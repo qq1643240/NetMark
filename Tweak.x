@@ -351,7 +351,7 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.5 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.6 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -416,10 +416,23 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 }
 %end
 
-// 第二层（兜底）：如果上面那条路在某个 iOS 版本上没被调用，
-// 就在文本真正落到视图时再替换一次，并统一字号。
-// 替换后的文本不是原生标识，所以不会和第一层互相叠加。
+// 第二层：状态栏文本视图自己的入口。
+// iOS 17 上 _UIStatusBarCellularItem 走的是 setOriginalText:（不是 setText:），
+// 在这里替换可以让视图按自己的字号/排版逻辑处理我们的文本，效果与原生一致。
 %hook _UIStatusBarStringView
+- (void)setOriginalText:(NSString *)text {
+    NSString *replacementString = NMReplacementForNativeLabel(text);
+    if (NMIsInterestingProcess() && NMIsNativeNetworkLabel(text)) {
+        NMLogOnce(@"stringViewOriginal", [NSString stringWithFormat:@"setOriginalText \"%@\" -> \"%@\"",
+                                          text, replacementString ?: @"nil"]);
+    }
+    if (replacementString.length > 0) {
+        %orig(replacementString);
+        return;
+    }
+    %orig;
+}
+
 - (void)setText:(NSString *)text {
     NSString *replacementString = NMReplacementForNativeLabel(text);
     if (NMIsInterestingProcess() && NMIsNativeNetworkLabel(text)) {
@@ -436,17 +449,29 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 }
 %end
 
-// 第三层兜底：实测 iOS 17 的状态栏文本既不经过 _stringForCellularType:，
-// 也不经过 _UIStatusBarStringView -setText:，最终落点是个普通 UILabel。
-// 只在 SpringBoard 内、且文本精确等于原生网络标识时才替换。
+// 第三层兜底：文本最终落到 UILabel 时再替换一次。
+// 关键是要保住原生字体——否则替换后的文本会用默认字体渲染，与其它状态栏文字对不上。
 %hook UILabel
 - (void)setText:(NSString *)text {
     if (NMIsSpringBoard() && NMIsNativeNetworkLabel(text)) {
         NSString *replacementString = NMReplacementForNativeLabel(text);
         if (replacementString.length > 0) {
-            NMLogOnce(@"uilabel", [NSString stringWithFormat:@"UILabel \"%@\" -> \"%@\"",
-                                   text, replacementString]);
+            UIFont *nativeFont = self.font;
+            CGSize nativeSize = self.bounds.size;
+
             %orig(replacementString);
+
+            if (nativeFont != nil) {
+                self.font = nativeFont;   // 沿用原生文本的字体，避免字号/字重被重置
+            }
+            self.adjustsFontSizeToFitWidth = NO;
+            self.minimumScaleFactor = 1.0;
+
+            NMLogOnce(@"uilabel", [NSString stringWithFormat:
+                                   @"UILabel \"%@\" -> \"%@\" font=%.1f/%.1f bounds=%.0fx%.0f",
+                                   text, replacementString,
+                                   nativeFont.pointSize, self.font.pointSize,
+                                   nativeSize.width, nativeSize.height]);
             return;
         }
     }

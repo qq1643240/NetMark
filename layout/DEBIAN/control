@@ -4,7 +4,7 @@ Name: NetMark
 Package: com.netmark.logo
 Section: Tweaks
 Depends: firmware (>= 13.0), preferenceloader
-Version: 5.0.5
+Version: 5.0.6
 Architecture: iphoneos-arm
 Description: Change your 4G/5G status bar logo (fixed or custom)
 Icon: file:///Library/PreferenceBundles/NetMark.bundle/Icon@2x.png
