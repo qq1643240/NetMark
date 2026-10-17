@@ -90,11 +90,10 @@ static BOOL NMIsSpringBoard(void) {
 
 // 把状态栏相关类真实存在的方法列出来，用于确定 iOS 17 上该 hook 哪个方法。
 static void NMDumpStatusBarClasses(void) {
-    NSArray<NSString *> *names = @[ @"_UIStatusBarCellularItem",
-                                    @"_UIStatusBarCellularCondensedItem",
-                                    @"_UIStatusBarStringView",
-                                    @"_UIStatusBarCellularItemView",
-                                    @"_UIStatusBarItem" ];
+    NSArray<NSString *> *names = @[ @"STUIStatusBarCellularNetworkTypeView",
+                                    @"STStatusBarDataNetworkEntry",
+                                    @"_UIStatusBarCellularItem",
+                                    @"_UIStatusBarStringView" ];
     for (NSString *name in names) {
         Class cls = objc_getClass(name.UTF8String);
         if (cls == Nil) {
@@ -107,19 +106,20 @@ static void NMDumpStatusBarClasses(void) {
         Method *methods = class_copyMethodList(cls, &count);
         for (unsigned int index = 0; index < count; index++) {
             NSString *selector = NSStringFromSelector(method_getName(methods[index]));
-            if ([selector rangeOfString:@"tring"].location != NSNotFound ||
-                [selector rangeOfString:@"Text"].location != NSNotFound ||
-                [selector rangeOfString:@"type"].location != NSNotFound) {
-                [hits addObject:selector];
+            if ([selector hasPrefix:@"_"]) {
+                continue;   // 跳过纯内部方法，减少噪音
             }
+            [hits addObject:selector];
         }
         free(methods);
 
+        // 分成两行输出，避免单行被截断
         NSString *joined = [hits componentsJoinedByString:@" "];
-        if (joined.length > 300) {
-            joined = [[joined substringToIndex:300] stringByAppendingString:@" …"];
-        }
-        NMLog(@"class %@ (%u) → %@", name, count, joined);
+        NSUInteger half = joined.length / 2;
+        NSString *firstHalf = [joined substringToIndex:half];
+        NSString *secondHalf = [joined substringFromIndex:half];
+        NMLog(@"class %@ (%u) ① %@", name, count, firstHalf);
+        NMLog(@"class %@ (续) ② %@", name, secondHalf);
     }
 }
 
@@ -379,7 +379,7 @@ static BOOL NMBlockTakesSingleInt(void *block) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.7 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.8 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -547,6 +547,38 @@ static BOOL NMBlockTakesSingleInt(void *block) {
             %orig(newText);
             return;
         }
+    }
+    %orig;
+}
+%end
+
+// 真正的容器：SystemStatusUI 的 STUIStatusBarCellularNetworkTypeView。
+// 5G+ / 5G UC 之所以渲染正常，是因为字符串由枚举层产生、直接进到这个视图，
+// 由它按原生规则排版；在 UILabel 上改字会绕过这一步。
+// 如果它有 setText: / setString:，在这里替换就能拿到正确排版。
+%hook STUIStatusBarCellularNetworkTypeView
+- (void)setText:(NSString *)text {
+    NSString *replacementString = NMReplacementForNativeLabel(text);
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"typeViewText", [NSString stringWithFormat:@"TypeView setText \"%@\" -> \"%@\"",
+                                    text, replacementString ?: @"nil"]);
+    }
+    if (replacementString.length > 0) {
+        %orig(replacementString);
+        return;
+    }
+    %orig;
+}
+
+- (void)setString:(NSString *)string {
+    NSString *replacementString = NMReplacementForNativeLabel(string);
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"typeViewString", [NSString stringWithFormat:@"TypeView setString \"%@\" -> \"%@\"",
+                                      string, replacementString ?: @"nil"]);
+    }
+    if (replacementString.length > 0) {
+        %orig(replacementString);
+        return;
     }
     %orig;
 }
