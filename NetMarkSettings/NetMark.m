@@ -16,8 +16,47 @@ typedef NS_ENUM(NSInteger, NMSection) {
     NMSection4G = 0,
     NMSection5G,
     NMSectionAction,
+    NMSectionDiagnostics,
     NMSectionCount
 };
+
+// 诊断日志由 tweak 写入 /tmp（并兜底写到偏好目录），设置页读取较新的那份。正式版会移除。
+static NSString *const kNMDebugLogPath = @"/tmp/netmark.log";
+static NSString *const kNMDebugLogPathAlt = @"/var/mobile/Library/Preferences/netmark.log";
+
+static NSString *NMReadLogTail(void) {
+    NSString *newestContent = nil;
+    NSTimeInterval newestStamp = -1;
+    for (NSString *path in @[ kNMDebugLogPath, kNMDebugLogPathAlt ]) {
+        NSDictionary *attributes = [[NSFileManager defaultManager]
+                                    attributesOfItemAtPath:path error:NULL];
+        NSDate *modifiedDate = attributes[NSFileModificationDate];
+        NSTimeInterval stamp = modifiedDate ? [modifiedDate timeIntervalSinceReferenceDate] : 0;
+        if (stamp <= newestStamp) {
+            continue;
+        }
+        NSString *content = [NSString stringWithContentsOfFile:path
+                                                      encoding:NSUTF8StringEncoding
+                                                         error:NULL];
+        if (content.length > 0) {
+            newestContent = content;
+            newestStamp = stamp;
+        }
+    }
+
+    if (newestContent.length == 0) {
+        return @"暂无日志。若已注销仍为空，说明 tweak 没注入到 SpringBoard。";
+    }
+    NSArray<NSString *> *lines = [newestContent componentsSeparatedByString:@"\n"];
+    NSUInteger start = lines.count > 8 ? lines.count - 8 : 0;
+    NSMutableArray<NSString *> *tail = [NSMutableArray array];
+    for (NSUInteger index = start; index < lines.count; index++) {
+        if (lines[index].length > 0) {
+            [tail addObject:lines[index]];
+        }
+    }
+    return tail.count > 0 ? [tail componentsJoinedByString:@"\n"] : @"日志为空。";
+}
 
 #pragma mark - 偏好读写
 
@@ -236,6 +275,7 @@ static BOOL NMRespringDevice(void) {
                                              selector:@selector(keyboardWillChangeFrame:)
                                                  name:UIKeyboardWillChangeFrameNotification
                                                object:nil];
+    [self.tableView reloadData];   // 刷新诊断日志
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -271,7 +311,7 @@ static BOOL NMRespringDevice(void) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == NMSectionAction) {
+    if (section == NMSectionAction || section == NMSectionDiagnostics) {
         return 1;
     }
     NSInteger count = (NSInteger)[self optionValuesForSection:section].count;
@@ -288,6 +328,9 @@ static BOOL NMRespringDevice(void) {
     if (section == NMSection5G) {
         return @"5G";
     }
+    if (section == NMSectionDiagnostics) {
+        return @"诊断日志";
+    }
     return nil;
 }
 
@@ -302,6 +345,9 @@ static BOOL NMRespringDevice(void) {
         return label ? [NSString stringWithFormat:@"5G 网络下显示「%@」。", label]
                      : @"5G 网络下跟随系统显示。";
     }
+    if (section == NMSectionDiagnostics) {
+        return NMReadLogTail();
+    }
     if (!self.writeSucceeded) {
         return @"⚠️ 设置写入失败，请检查越狱环境或磁盘权限。";
     }
@@ -311,6 +357,18 @@ static BOOL NMRespringDevice(void) {
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == NMSectionAction) {
         return [self actionCellForTableView:tableView];
+    }
+    if (indexPath.section == NMSectionDiagnostics) {
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"NMDiagnosticsCell"];
+        if (cell == nil) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                          reuseIdentifier:@"NMDiagnosticsCell"];
+            cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+            cell.textLabel.textAlignment = NSTextAlignmentCenter;
+        }
+        cell.textLabel.text = @"刷新日志";
+        cell.textLabel.textColor = self.view.tintColor;
+        return cell;
     }
 
     NSArray<NSNumber *> *values = [self optionValuesForSection:indexPath.section];
@@ -341,6 +399,10 @@ static BOOL NMRespringDevice(void) {
 
     if (indexPath.section == NMSectionAction) {
         [self respring];
+        return;
+    }
+    if (indexPath.section == NMSectionDiagnostics) {
+        [tableView reloadData];
         return;
     }
 

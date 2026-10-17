@@ -10,7 +10,72 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <math.h>
+#import <unistd.h>
 #import "NMPreferences.h"
+
+#pragma mark - 诊断日志
+//
+// 写入 /tmp/netmark.log，设置页会直接读取展示。
+// 用于判断：dylib 是否注入 SpringBoard、枚举层是否被调用、字符串层收到了什么、设置读到了什么。
+// 正式版会移除。
+
+#define NMLogPath @"/tmp/netmark.log"
+#define NMLogPathAlt @"/var/mobile/Library/Preferences/netmark.log"
+
+static void NMLogWrite(NSString *path, NSString *line) {
+    NSDictionary *attributes = [[NSFileManager defaultManager]
+                                attributesOfItemAtPath:path error:NULL];
+    if ([attributes[NSFileSize] unsignedLongLongValue] > 64 * 1024) {
+        [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    }
+
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (handle == nil) {
+        [line writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        return;
+    }
+    @try {
+        [handle seekToEndOfFile];
+        [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    } @finally {
+        [handle closeFile];
+    }
+}
+
+static void NMLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    NSString *line = [NSString stringWithFormat:@"[%d] %@\n", getpid(), message];
+    // 两个位置都写：/tmp 不一定可写，偏好目录兜底
+    NMLogWrite(NMLogPath, line);
+    NMLogWrite(NMLogPathAlt, line);
+}
+
+static BOOL NMIsInterestingProcess(void) {
+    NSString *name = [NSProcessInfo processInfo].processName;
+    return [name isEqualToString:@"SpringBoard"]
+        || [name isEqualToString:@"Preferences"]
+        || [name isEqualToString:@"SystemStatusServer"];
+}
+
+// 状态栏每次刷新都会调用这些 hook，日志只记录"值发生变化"的时刻。
+static void NMLogOnce(NSString *key, NSString *message) {
+    static NSMutableDictionary<NSString *, NSString *> *lastMessages = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lastMessages = [NSMutableDictionary dictionary];
+    });
+    @synchronized (lastMessages) {
+        if ([lastMessages[key] isEqualToString:message]) {
+            return;
+        }
+        lastMessages[key] = [message copy];
+    }
+    NMLog(@"%@", message);
+}
 
 #pragma mark - 连接类型
 //
@@ -233,6 +298,16 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 
 #pragma mark - Hook
 
+%ctor {
+    if (NMIsInterestingProcess()) {
+        NSDictionary *preferences = NMCurrentPreferences();
+        NMLog(@"=== loaded %@ build=5.0.4 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"prefs paths=%@", NMPreferencePaths());
+        NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
+              preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
+    }
+}
+
 // 枚举层：把当前制式改写成用户选择对应的系统枚举，
 // 让系统自己渲染出 LTE-A / LTE+ / 5G UC 这类原生标识。
 %hook STTelephonySubscriptionContext
@@ -251,6 +326,12 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
         default:
             break;   // 3G / 2G 一律不动
     }
+
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"enum", [NSString stringWithFormat:@"enum %d -> %d (4G=%@ 5G=%@)",
+                            originalType, targetType > 0 ? targetType : originalType,
+                            preferences[NMKey4GMode], preferences[NMKey5GMode]]);
+    }
     return targetType > 0 ? targetType : originalType;
 }
 %end
@@ -261,6 +342,10 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 - (NSString *)_stringForCellularType:(int)connectionType {
     NSString *originalString = %orig;
     NSString *replacementString = NMReplacementForNativeLabel(originalString);
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"cellItem", [NSString stringWithFormat:@"cellItem type=%d \"%@\" -> \"%@\"",
+                                connectionType, originalString, replacementString ?: @"nil"]);
+    }
     return replacementString.length > 0 ? replacementString : originalString;
 }
 %end
@@ -270,6 +355,10 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 - (NSString *)_stringForCellularType:(int)connectionType {
     NSString *originalString = %orig;
     NSString *replacementString = NMReplacementForNativeLabel(originalString);
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"condensed", [NSString stringWithFormat:@"condensed type=%d \"%@\" -> \"%@\"",
+                                 connectionType, originalString, replacementString ?: @"nil"]);
+    }
     return replacementString.length > 0 ? replacementString : originalString;
 }
 %end
@@ -280,6 +369,10 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 %hook _UIStatusBarStringView
 - (void)setText:(NSString *)text {
     NSString *replacementString = NMReplacementForNativeLabel(text);
+    if (NMIsInterestingProcess() && NMIsNativeNetworkLabel(text)) {
+        NMLogOnce(@"stringView", [NSString stringWithFormat:@"stringView \"%@\" -> \"%@\"",
+                                  text, replacementString ?: @"nil"]);
+    }
     if (replacementString.length > 0) {
         %orig(replacementString);
         NMMatchNativeFontSize(self, replacementString);
