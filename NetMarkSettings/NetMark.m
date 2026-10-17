@@ -48,7 +48,7 @@ static NSString *NMReadLogTail(void) {
         return @"暂无日志。若已注销仍为空，说明 tweak 没注入到 SpringBoard。";
     }
     NSArray<NSString *> *lines = [newestContent componentsSeparatedByString:@"\n"];
-    NSUInteger start = lines.count > 8 ? lines.count - 8 : 0;
+    NSUInteger start = lines.count > 16 ? lines.count - 16 : 0;
     NSMutableArray<NSString *> *tail = [NSMutableArray array];
     for (NSUInteger index = start; index < lines.count; index++) {
         if (lines[index].length > 0) {

@@ -11,6 +11,7 @@
 #import <UIKit/UIKit.h>
 #import <math.h>
 #import <unistd.h>
+#import <objc/runtime.h>
 #import "NMPreferences.h"
 
 #pragma mark - 诊断日志
@@ -75,6 +76,50 @@ static void NMLogOnce(NSString *key, NSString *message) {
         lastMessages[key] = [message copy];
     }
     NMLog(@"%@", message);
+}
+
+static BOOL NMIsSpringBoard(void) {
+    static BOOL isSpringBoard = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        isSpringBoard = [[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"];
+    });
+    return isSpringBoard;
+}
+
+// 把状态栏相关类真实存在的方法列出来，用于确定 iOS 17 上该 hook 哪个方法。
+static void NMDumpStatusBarClasses(void) {
+    NSArray<NSString *> *names = @[ @"_UIStatusBarCellularItem",
+                                    @"_UIStatusBarCellularCondensedItem",
+                                    @"_UIStatusBarStringView",
+                                    @"_UIStatusBarCellularItemView",
+                                    @"_UIStatusBarItem" ];
+    for (NSString *name in names) {
+        Class cls = objc_getClass(name.UTF8String);
+        if (cls == Nil) {
+            NMLog(@"class %@ : 不存在", name);
+            continue;
+        }
+
+        NSMutableArray<NSString *> *hits = [NSMutableArray array];
+        unsigned int count = 0;
+        Method *methods = class_copyMethodList(cls, &count);
+        for (unsigned int index = 0; index < count; index++) {
+            NSString *selector = NSStringFromSelector(method_getName(methods[index]));
+            if ([selector rangeOfString:@"tring"].location != NSNotFound ||
+                [selector rangeOfString:@"Text"].location != NSNotFound ||
+                [selector rangeOfString:@"type"].location != NSNotFound) {
+                [hits addObject:selector];
+            }
+        }
+        free(methods);
+
+        NSString *joined = [hits componentsJoinedByString:@" "];
+        if (joined.length > 300) {
+            joined = [[joined substringToIndex:300] stringByAppendingString:@" …"];
+        }
+        NMLog(@"class %@ (%u) → %@", name, count, joined);
+    }
 }
 
 #pragma mark - 连接类型
@@ -300,11 +345,19 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 
 %ctor {
     if (NMIsInterestingProcess()) {
+        // SpringBoard 启动时清空日志，保证每次注销后是一份干净的记录
+        if (NMIsSpringBoard()) {
+            [@"" writeToFile:NMLogPath atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+            [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.4 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.5 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
+        if (NMIsSpringBoard()) {
+            NMDumpStatusBarClasses();
+        }
     }
 }
 
@@ -380,5 +433,40 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
         %orig;
         NMMatchNativeFontSize(self, text);
     }
+}
+%end
+
+// 第三层兜底：实测 iOS 17 的状态栏文本既不经过 _stringForCellularType:，
+// 也不经过 _UIStatusBarStringView -setText:，最终落点是个普通 UILabel。
+// 只在 SpringBoard 内、且文本精确等于原生网络标识时才替换。
+%hook UILabel
+- (void)setText:(NSString *)text {
+    if (NMIsSpringBoard() && NMIsNativeNetworkLabel(text)) {
+        NSString *replacementString = NMReplacementForNativeLabel(text);
+        if (replacementString.length > 0) {
+            NMLogOnce(@"uilabel", [NSString stringWithFormat:@"UILabel \"%@\" -> \"%@\"",
+                                   text, replacementString]);
+            %orig(replacementString);
+            return;
+        }
+    }
+    %orig;
+}
+
+- (void)setAttributedText:(NSAttributedString *)text {
+    NSString *string = text.string;
+    if (NMIsSpringBoard() && NMIsNativeNetworkLabel(string)) {
+        NSString *replacementString = NMReplacementForNativeLabel(string);
+        if (replacementString.length > 0) {
+            NSMutableAttributedString *newText = [text mutableCopy];
+            [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
+                                   withString:replacementString];
+            NMLogOnce(@"uilabelAttr", [NSString stringWithFormat:@"UILabelAttr \"%@\" -> \"%@\"",
+                                       string, replacementString]);
+            %orig(newText);
+            return;
+        }
+    }
+    %orig;
 }
 %end
