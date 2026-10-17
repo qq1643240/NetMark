@@ -14,25 +14,109 @@
 
 #pragma mark - 连接类型
 //
-// 不再依赖 modemDataConnectionType 的枚举数值（iOS 各版本可能调整，且改枚举会污染真实网络状态），
-// 改为直接识别系统已经渲染出来的原生标识文本。这样与枚举取值完全解耦。
+// 两条路同时走：
+//   1. 枚举层（modemDataConnectionType）：让系统自己渲染出对应制式的原生标识，
+//      这条是上游原版验证过可用的路径，负责"至少能变"。
+//   2. 字符串层（_stringForCellularType: / -setText:）：把原生标识替换成
+//      4Gᴀ / 5Gᴀ / 自定义等系统枚举表达不了的精确文本。
 
-#pragma mark - 偏好读取（按 mtime 缓存，避免每次刷新都解析 plist）
+typedef NS_ENUM(int, NMConnectionType) {
+    NMConnection4GOverride = 6,
+    NMConnectionLTE        = 7,
+    NMConnectionLTEA       = 8,
+    NMConnectionLTEPlus    = 9,
+    NMConnection5GE        = 10,
+    NMConnection5G         = 11,
+    NMConnection5GPlus     = 12,
+    NMConnection5GUWB      = 13,
+    NMConnection5GUC       = 14,
+};
+
+typedef NS_ENUM(NSInteger, NMConnectionFamily) {
+    NMConnectionFamilyOther = 0,
+    NMConnectionFamily4G,
+    NMConnectionFamily5G,
+};
+
+static NMConnectionFamily NMFamilyForConnectionType(int connectionType) {
+    switch (connectionType) {
+        case NMConnection4GOverride:
+        case NMConnectionLTE:
+        case NMConnectionLTEA:
+        case NMConnectionLTEPlus:
+        case NMConnection5GE:      // 5GE 实质是 LTE-A Pro
+            return NMConnectionFamily4G;
+
+        case NMConnection5G:
+        case NMConnection5GPlus:
+        case NMConnection5GUWB:
+        case NMConnection5GUC:
+            return NMConnectionFamily5G;
+
+        default:
+            return NMConnectionFamilyOther;
+    }
+}
+
+// 把用户选择映射成系统枚举；0 表示没有对应项（自定义 / 默认）。
+static int NMEnumForMode(NSInteger mode, BOOL is4G) {
+    if (is4G) {
+        switch (mode) {
+            case NM4GOption4GA:    return NMConnectionLTEA;
+            case NM4GOption4GPlus: return NMConnectionLTEPlus;
+            default:               return 0;
+        }
+    }
+    switch (mode) {
+        case NM5GOption5GPlus: return NMConnection5GPlus;
+        case NM5GOption5GA:    return NMConnection5G;      // 5Gᴀ 没有对应枚举，退回 5G
+        case NM5GOption5GUWB:  return NMConnection5GUWB;
+        case NM5GOption5GUC:   return NMConnection5GUC;
+        default:               return 0;
+    }
+}
+
+#pragma mark - 偏好读取（双路径 + 按 mtime 缓存）
 
 static NSDictionary *gNMPreferences = nil;
-static NSTimeInterval gNMPreferencesStamp = 0;
+static NSTimeInterval gNMPreferencesStamp = -1;
 
-static NSDictionary *NMCurrentPreferences(void) {
-    NSDictionary *attributes = [[NSFileManager defaultManager]
-                                attributesOfItemAtPath:NMPreferencesPath error:NULL];
-    NSDate *modifiedDate = attributes[NSFileModificationDate];
-    NSTimeInterval stamp = modifiedDate ? [modifiedDate timeIntervalSinceReferenceDate] : 0;
-
-    if (gNMPreferences == nil || stamp != gNMPreferencesStamp) {
-        gNMPreferencesStamp = stamp;
-        NSDictionary *loaded = [NSDictionary dictionaryWithContentsOfFile:NMPreferencesPath];
-        gNMPreferences = loaded ?: @{};
+static NSTimeInterval NMPreferencesCompositeStamp(void) {
+    NSTimeInterval total = 0;
+    for (NSString *path in NMPreferencePaths()) {
+        NSDictionary *attributes = [[NSFileManager defaultManager]
+                                    attributesOfItemAtPath:path error:NULL];
+        NSDate *modifiedDate = attributes[NSFileModificationDate];
+        total += modifiedDate ? [modifiedDate timeIntervalSinceReferenceDate] : 0;
     }
+    return total;
+}
+
+// 两个路径都看，取 mtime 最新的那份（设置面板写哪份都能读到）。
+static NSDictionary *NMCurrentPreferences(void) {
+    NSTimeInterval stamp = NMPreferencesCompositeStamp();
+    if (gNMPreferences != nil && stamp == gNMPreferencesStamp) {
+        return gNMPreferences;
+    }
+    gNMPreferencesStamp = stamp;
+
+    NSDictionary *newest = nil;
+    NSTimeInterval newestStamp = -1;
+    for (NSString *path in NMPreferencePaths()) {
+        NSDictionary *attributes = [[NSFileManager defaultManager]
+                                    attributesOfItemAtPath:path error:NULL];
+        NSDate *modifiedDate = attributes[NSFileModificationDate];
+        NSTimeInterval pathStamp = modifiedDate ? [modifiedDate timeIntervalSinceReferenceDate] : 0;
+        if (pathStamp <= newestStamp) {
+            continue;
+        }
+        NSDictionary *loaded = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (loaded.count > 0) {
+            newest = loaded;
+            newestStamp = pathStamp;
+        }
+    }
+    gNMPreferences = newest ?: @{};
     return gNMPreferences;
 }
 
@@ -149,7 +233,29 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 
 #pragma mark - Hook
 
-// 第一层：系统计算标识文本时替换。
+// 枚举层：把当前制式改写成用户选择对应的系统枚举，
+// 让系统自己渲染出 LTE-A / LTE+ / 5G UC 这类原生标识。
+%hook STTelephonySubscriptionContext
+- (int)modemDataConnectionType {
+    int originalType = %orig;
+    NSDictionary *preferences = NMCurrentPreferences();
+    int targetType = 0;
+
+    switch (NMFamilyForConnectionType(originalType)) {
+        case NMConnectionFamily4G:
+            targetType = NMEnumForMode([preferences[NMKey4GMode] integerValue], YES);
+            break;
+        case NMConnectionFamily5G:
+            targetType = NMEnumForMode([preferences[NMKey5GMode] integerValue], NO);
+            break;
+        default:
+            break;   // 3G / 2G 一律不动
+    }
+    return targetType > 0 ? targetType : originalType;
+}
+%end
+
+// 字符串层（第一层）：系统计算标识文本时替换。
 // 判断依据是系统原本要显示的字符串，不依赖任何枚举数值。
 %hook _UIStatusBarCellularItem
 - (NSString *)_stringForCellularType:(int)connectionType {

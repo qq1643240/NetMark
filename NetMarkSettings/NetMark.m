@@ -22,36 +22,61 @@ typedef NS_ENUM(NSInteger, NMSection) {
 #pragma mark - 偏好读写
 
 static NSMutableDictionary *NMLoadPreferences(void) {
-    NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:NMPreferencesPath];
-    if (stored.count == 0) {
+    // 两个写入位置都看，取 mtime 最新的那份
+    NSDictionary *newest = nil;
+    NSTimeInterval newestStamp = -1;
+    for (NSString *path in NMPreferencePaths()) {
+        NSDictionary *attributes = [[NSFileManager defaultManager]
+                                    attributesOfItemAtPath:path error:NULL];
+        NSDate *modifiedDate = attributes[NSFileModificationDate];
+        NSTimeInterval pathStamp = modifiedDate ? [modifiedDate timeIntervalSinceReferenceDate] : 0;
+        if (pathStamp <= newestStamp) {
+            continue;
+        }
+        NSDictionary *loaded = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (loaded.count > 0) {
+            newest = loaded;
+            newestStamp = pathStamp;
+        }
+    }
+
+    if (newest.count == 0) {
         // 从旧版（Data Logo Switcher）迁移：先找正常路径，再找 rootless 误写路径
         NSArray<NSString *> *legacyPaths = @[ NMLegacyPreferencesPath, NMLegacyRootlessPath ];
         for (NSString *legacyPath in legacyPaths) {
-            if ([legacyPath isEqualToString:NMPreferencesPath]) {
+            if ([NMPreferencePaths() containsObject:legacyPath]) {
                 continue;
             }
-            stored = [NSDictionary dictionaryWithContentsOfFile:legacyPath];
-            if (stored.count > 0) {
+            newest = [NSDictionary dictionaryWithContentsOfFile:legacyPath];
+            if (newest.count > 0) {
                 break;
             }
         }
     }
-    return stored ? [stored mutableCopy] : [NSMutableDictionary dictionary];
+    return newest ? [newest mutableCopy] : [NSMutableDictionary dictionary];
 }
 
-static void NMStorePreferences(NSDictionary *preferences) {
-    NSString *directory = [NMPreferencesPath stringByDeletingLastPathComponent];
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory
-                              withIntermediateDirectories:YES
-                                               attributes:nil
-                                                    error:NULL];
-    [preferences writeToFile:NMPreferencesPath atomically:YES];
+// 两个位置都写：哪个进程能看到哪份就用哪份。返回是否至少成功写了一份。
+static BOOL NMStorePreferences(NSDictionary *preferences) {
+    BOOL wroteAny = NO;
+    for (NSString *path in NMPreferencePaths()) {
+        NSString *directory = [path stringByDeletingLastPathComponent];
+        [[NSFileManager defaultManager] createDirectoryAtPath:directory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        if ([preferences writeToFile:path atomically:YES]) {
+            wroteAny = YES;
+        }
+    }
+    return wroteAny;
 }
 
 // 旧版数据迁移：清理已删除的键，并把已移除的选项回落到默认值。
-static void NMMigratePreferences(NSMutableDictionary *preferences) {
+// 返回写入是否成功（无迁移时视为成功）。
+static BOOL NMMigratePreferences(NSMutableDictionary *preferences) {
     if ([preferences[NMKeySchemaVersion] integerValue] >= 3) {
-        return;
+        return YES;
     }
 
     // 4G 表只保留 0(默认) / 3(4Gᴀ) / 4(4G+) / 99(自定义)
@@ -72,7 +97,7 @@ static void NMMigratePreferences(NSMutableDictionary *preferences) {
     [preferences removeObjectForKey:@"custom3GString"];
 
     preferences[NMKeySchemaVersion] = @3;
-    NMStorePreferences(preferences);
+    return NMStorePreferences(preferences);
 }
 
 #pragma mark - 注销
@@ -160,6 +185,7 @@ static BOOL NMRespringDevice(void) {
 @property (nonatomic, assign) NSInteger mode5G;
 @property (nonatomic, copy) NSString *custom4G;
 @property (nonatomic, copy) NSString *custom5G;
+@property (nonatomic, assign) BOOL writeSucceeded;
 @end
 
 @implementation NMRootViewController
@@ -181,7 +207,7 @@ static BOOL NMRespringDevice(void) {
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     self.preferences = NMLoadPreferences();
-    NMMigratePreferences(self.preferences);
+    self.writeSucceeded = NMMigratePreferences(self.preferences);
 
     self.mode4G = [self.preferences[NMKey4GMode] integerValue];
     self.mode5G = [self.preferences[NMKey5GMode] integerValue];
@@ -275,6 +301,9 @@ static BOOL NMRespringDevice(void) {
         NSString *label = NM5GLabelForValue(self.mode5G, self.custom5G);
         return label ? [NSString stringWithFormat:@"5G 网络下显示「%@」。", label]
                      : @"5G 网络下跟随系统显示。";
+    }
+    if (!self.writeSucceeded) {
+        return @"⚠️ 设置写入失败，请检查越狱环境或磁盘权限。";
     }
     return @"修改后需注销才能生效；「默认」表示完全跟随系统与运营商设置。";
 }
@@ -411,7 +440,17 @@ static BOOL NMRespringDevice(void) {
     self.preferences[NMKey4GCustom] = self.custom4G ?: @"";
     self.preferences[NMKey5GCustom] = self.custom5G ?: @"";
     self.preferences[NMKeySchemaVersion] = @3;
-    NMStorePreferences(self.preferences);
+
+    BOOL previous = self.writeSucceeded;
+    self.writeSucceeded = NMStorePreferences(self.preferences);
+
+    if (previous != self.writeSucceeded) {
+        // 只在状态变化时刷新，避免每次点选都闪一下
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:NMSectionAction]
+                         withRowAnimation:UITableViewRowAnimationNone];
+        });
+    }
 }
 
 - (void)customTextDidChange:(UITextField *)field {

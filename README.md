@@ -10,6 +10,21 @@
 
 ## 更新记录
 
+**5.0.3** — 修复「选了没变化」。
+
+5.0.2 把替换逻辑全放在字符串层（`_stringForCellularType:` / `-setText:`），实测在 iOS 17 上
+这条路径不生效；而上游原版靠改写 `modemDataConnectionType` 让系统自己渲染，是验证过可用的。
+本版恢复**双保险**：
+
+1. **枚举层**（`STTelephonySubscriptionContext -modemDataConnectionType`）：按选择把制式
+   改写成对应枚举（`4Gᴀ`→LTE-A、`4G+`→LTE+、`5G+`/`5G UWB`/`5G UC`→对应值），系统自己渲染。
+   这条即使字符串层失效也能看到变化。
+2. **字符串层**：把系统渲染出的原生标识替换成 `4Gᴀ` / `5Gᴀ` / 自定义等枚举表达不了的精确文本。
+   两层叠加，最终显示以字符串层为准。
+3. **偏好双路径**：同时写 `/var/mobile/...` 与 `ROOT_PATH_NS` 前缀路径，读取时取 mtime 最新的那份。
+   rootless / roothide 下两个进程对 `/var/mobile` 的可见性可能不同，双写双读兜住这种情况。
+4. 设置页底部在写入失败时会显示「⚠️ 设置写入失败」，不再静默。
+
 **5.0.2** — 修复「设置后状态栏没变化」。
 
 1. 替换依据从 `modemDataConnectionType` 枚举值改为**系统原生标识文本**。原实现把 6/7/8/9 当 4G、

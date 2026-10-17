@@ -14,12 +14,25 @@
 
 #pragma mark - 存储位置
 
-// 用户数据固定落在 mobile 家目录，不随 rootless 前缀移动。
+// 同时写两份：真实路径 + 越狱根前缀路径。
+// rootless / roothide 下两个进程对 /var/mobile 的可见性可能不同，
+// 双写双读可以保证设置一定能被 SpringBoard 读到。
 #define NMPreferencesPath          @"/var/mobile/Library/Preferences/com.netmark.logo.plist"
+#define NMPreferencesPathPrefixed  ROOT_PATH_NS(@"/var/mobile/Library/Preferences/com.netmark.logo.plist")
 // 旧版（Data Logo Switcher）的存储位置，仅用于首次启动时迁移设置。
 #define NMLegacyPreferencesPath    @"/var/mobile/Library/Preferences/tw.hiraku.datalogoswitcher.plist"
 // 旧版在 rootless 环境下误写到 /var/jb/var/mobile/...
 #define NMLegacyRootlessPath       ROOT_PATH_NS(@"/var/mobile/Library/Preferences/tw.hiraku.datalogoswitcher.plist")
+
+// 去重后的路径列表（rootful 下两条相同，只留一条）。
+static inline NSArray<NSString *> *NMPreferencePaths(void) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithObject:NMPreferencesPath];
+    NSString *prefixed = NMPreferencesPathPrefixed;
+    if (prefixed.length > 0 && ![paths containsObject:prefixed]) {
+        [paths addObject:prefixed];
+    }
+    return paths;
+}
 
 #pragma mark - 偏好键
 
