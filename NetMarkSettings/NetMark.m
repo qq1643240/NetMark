@@ -132,6 +132,14 @@ static void NMRespringDevice(void) {
 
 #pragma mark 生命周期
 
+- (void)loadView {
+    // PSViewController 的视图由 specifier 驱动，这里换成自绘容器，
+    // 保证 viewDidLoad 里拿到的是我们自己的 view。
+    UIView *view = [[UIView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.view = view;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 

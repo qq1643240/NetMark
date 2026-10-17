@@ -2,6 +2,7 @@ BUNDLE_NAME = NetMark
 NetMark_FILES = NetMark.m
 NetMark_INSTALL_PATH = /Library/PreferenceBundles
 NetMark_FRAMEWORKS = UIKit
+NetMark_PRIVATE_FRAMEWORKS = Preferences
 NetMark_CFLAGS = -fobjc-arc -I..
 
 GO_EASY_ON_ME = 1
