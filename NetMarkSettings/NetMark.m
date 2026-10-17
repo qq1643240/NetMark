@@ -48,32 +48,30 @@ static void NMStorePreferences(NSDictionary *preferences) {
     [preferences writeToFile:NMPreferencesPath atomically:YES];
 }
 
-// 旧版数据迁移：移除 3G 相关键，并把已删除的跨制式选项回落到默认值。
+// 旧版数据迁移：清理已删除的键，并把已移除的选项回落到默认值。
 static void NMMigratePreferences(NSMutableDictionary *preferences) {
-    if ([preferences[NMKeySchemaVersion] integerValue] >= 2) {
+    if ([preferences[NMKeySchemaVersion] integerValue] >= 3) {
         return;
     }
 
-    // 旧 4G 表的 5...9（5GE / 5G / 5G+ / 5G UWB / 5G UC）已删除
+    // 4G 表只保留 0(默认) / 3(4Gᴀ) / 4(4G+) / 99(自定义)
     NSInteger mode4G = [preferences[NMKey4GMode] integerValue];
-    if (mode4G > NM4GOption4GPlus && mode4G != NM4GOptionCustom) {
+    if (mode4G != NM4GOptionDefault && mode4G != NM4GOption4GA &&
+        mode4G != NM4GOption4GPlus && mode4G != NM4GOptionCustom) {
         preferences[NMKey4GMode] = @(NM4GOptionDefault);
     }
 
-    // 旧 5G 表：3 = 5G UWB，4 = 5G UC；新表顺延为 4 / 5
+    // 5G 表只保留 0(默认) / 2(5G+) / 3(5Gᴀ) / 4(5G UWB) / 5(5G UC) / 99(自定义)
     NSInteger mode5G = [preferences[NMKey5GMode] integerValue];
-    if (mode5G == 3) {
-        preferences[NMKey5GMode] = @(NM5GOption5GUWB);
-    } else if (mode5G == 4) {
-        preferences[NMKey5GMode] = @(NM5GOption5GUC);
-    } else if (mode5G > NM5GOption5GUC && mode5G != NM5GOptionCustom) {
+    if (mode5G != NM5GOptionDefault && mode5G != NM5GOption5GPlus && mode5G != NM5GOption5GA &&
+        mode5G != NM5GOption5GUWB && mode5G != NM5GOption5GUC && mode5G != NM5GOptionCustom) {
         preferences[NMKey5GMode] = @(NM5GOptionDefault);
     }
 
     [preferences removeObjectForKey:@"3G"];
     [preferences removeObjectForKey:@"custom3GString"];
 
-    preferences[NMKeySchemaVersion] = @2;
+    preferences[NMKeySchemaVersion] = @3;
     NMStorePreferences(preferences);
 }
 
@@ -98,21 +96,57 @@ static void NMSpawnProcess(NSString *path, NSArray<NSString *> *arguments) {
     posix_spawn(&pid, path.fileSystemRepresentation, NULL, NULL, (char *const *)argv, NULL);
 }
 
-static void NMRespringDevice(void) {
-    NSString *sbreloadPath = ROOT_PATH_NS(@"/usr/bin/sbreload");
-    if ([[NSFileManager defaultManager] fileExistsAtPath:sbreloadPath]) {
-        NMSpawnProcess(sbreloadPath, @[]);
-        return;
+// 从自身 bundle 位置反推越狱根目录：
+//   rootless  <root>/Library/PreferenceBundles/NetMark.bundle  → /var/jb
+//   roothide  <jbroot>/Library/PreferenceBundles/NetMark.bundle → .jbroot-XXXX
+//   rootful   /Library/PreferenceBundles/NetMark.bundle         → /
+static NSString *NMJailbreakRoot(void) {
+    NSString *bundlePath = [NSBundle bundleForClass:[NMRootViewController class]].bundlePath;
+    if (bundlePath.length == 0) {
+        return nil;
+    }
+    NSString *root = [[[bundlePath stringByDeletingLastPathComponent]
+                       stringByDeletingLastPathComponent]
+                      stringByDeletingLastPathComponent];
+    return root.length > 0 ? root : nil;
+}
+
+static NSArray<NSString *> *NMCandidateRoots(void) {
+    NSMutableArray<NSString *> *roots = [NSMutableArray array];
+    NSString *derived = NMJailbreakRoot();
+    if (derived.length > 0) {
+        [roots addObject:derived];
+    }
+    for (NSString *fallback in @[ @"/var/jb", @"/" ]) {
+        if (![roots containsObject:fallback]) {
+            [roots addObject:fallback];
+        }
+    }
+    return roots;
+}
+
+// 返回 YES 表示已经发起注销；NO 表示找不到可用的 sbreload / killall。
+static BOOL NMRespringDevice(void) {
+    NSArray<NSString *> *roots = NMCandidateRoots();
+
+    for (NSString *root in roots) {
+        NSString *sbreloadPath = [root stringByAppendingPathComponent:@"usr/bin/sbreload"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:sbreloadPath]) {
+            NMSpawnProcess(sbreloadPath, @[]);
+            return YES;
+        }
     }
 
-    NSArray<NSString *> *killallPaths = @[ ROOT_PATH_NS(@"/usr/bin/killall"), @"/usr/bin/killall" ];
-    for (NSString *killallPath in killallPaths) {
+    for (NSString *root in roots) {
+        NSString *killallPath = [root stringByAppendingPathComponent:@"usr/bin/killall"];
         if ([[NSFileManager defaultManager] fileExistsAtPath:killallPath]) {
             NMSpawnProcess(killallPath, @[ @"-9", @"SpringBoard" ]);
             NMSpawnProcess(killallPath, @[ @"-9", @"backboardd" ]);
-            return;
+            return YES;
         }
     }
+
+    return NO;
 }
 
 #pragma mark - 设置页
@@ -376,7 +410,7 @@ static void NMRespringDevice(void) {
     self.preferences[NMKey5GMode] = @(self.mode5G);
     self.preferences[NMKey4GCustom] = self.custom4G ?: @"";
     self.preferences[NMKey5GCustom] = self.custom5G ?: @"";
-    self.preferences[NMKeySchemaVersion] = @2;
+    self.preferences[NMKeySchemaVersion] = @3;
     NMStorePreferences(self.preferences);
 }
 
@@ -403,9 +437,18 @@ static void NMRespringDevice(void) {
 - (void)respring {
     [self.view endEditing:YES];
     [self persistPreferences];
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        NMRespringDevice();
+        if (!NMRespringDevice()) {
+            // 找不到 sbreload / killall 时明确告知，避免"点了没反应"
+            UIAlertController *alert =
+            [UIAlertController alertControllerWithTitle:@"无法自动注销"
+                                                message:@"没找到 sbreload 或 killall，设置已保存，请手动注销设备。"
+                                         preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        }
     });
 }
 

@@ -10,6 +10,20 @@
 
 ## 更新记录
 
+**5.0.2** — 修复「设置后状态栏没变化」。
+
+1. 替换依据从 `modemDataConnectionType` 枚举值改为**系统原生标识文本**。原实现把 6/7/8/9 当 4G、
+   11–14 当 5G，一旦 iOS 调整枚举顺序就整条失效；现在只认系统渲染出来的 `LTE` / `5G` 等字符串，
+   与枚举完全解耦。
+2. 增加第二层兜底：除了 `_stringForCellularType:`，还在 `_UIStatusBarStringView -setText:` 里
+   再替换一次。哪一层先命中都能生效，替换后的文本不是原生标识，两层不会互相叠加。
+3. 注销按钮改为从**自身 bundle 位置反推越狱根目录**（`.../Library/PreferenceBundles/NetMark.bundle`
+   往上三层），rootless 得到 `/var/jb`、roothide 得到 `.jbroot-XXXX`、rootful 得到 `/`。
+   原先依赖 `ROOT_PATH_NS`，在 roothide 下拿不到正确路径，点了等于没点。找不到 `sbreload` /
+   `killall` 时会弹窗提示，不再静默失败。
+4. 移除 `4G` / `LTE` / `5G` 三个选项（等同系统默认或已被 `4Gᴀ` / `4G+` / `5G+` 覆盖）。
+   旧数据里选过这三项会自动回落到「默认」。
+
 **5.0.1** — 修复进入设置页闪退。`PSListController` 在 `controllerForSpecifier:` 中会直接给
 detail 控制器发 `setSpecifier:` / `setRootController:` / `setParentController:`，
 设置页原先继承 `UIViewController`，收到未知 selector 触发 `unrecognized selector` → `SIGABRT`。
@@ -21,8 +35,8 @@ detail 控制器发 `setSpecifier:` / `setRootController:` / `setParentControlle
 
 | 分组 | 可选标识 |
 | --- | --- |
-| 4G / LTE | 默认、4G、LTE、**4Gᴀ**、4G+、自定义 |
-| 5G | 默认、5G、5G+、**5Gᴀ**、5G UWB、5G UC、自定义 |
+| 4G / LTE | 默认、**4Gᴀ**、4G+、自定义 |
+| 5G | 默认、5G+、**5Gᴀ**、5G UWB、5G UC、自定义 |
 
 - **固定显示**：选项直接决定状态栏文本，不再依赖系统对连接类型的枚举渲染。
 - **自定义**：选择「自定义」后输入任意文本（上限 6 个字符），留空则回落到系统默认。

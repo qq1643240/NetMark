@@ -13,46 +13,9 @@
 #import "NMPreferences.h"
 
 #pragma mark - 连接类型
-// 数值沿用 iOS 内部 STTelephonySubscriptionContext.modemDataConnectionType 的定义（iOS 12.2+），
-// 只保留 4G / 5G 相关的取值。
-
-typedef NS_ENUM(int, NMConnectionType) {
-    NMConnection4GOverride = 6,
-    NMConnectionLTE        = 7,
-    NMConnectionLTEA       = 8,
-    NMConnectionLTEPlus    = 9,
-    NMConnection5GE        = 10,
-    NMConnection5G         = 11,
-    NMConnection5GPlus     = 12,
-    NMConnection5GUWB      = 13,
-    NMConnection5GUC       = 14,
-};
-
-typedef NS_ENUM(NSInteger, NMConnectionFamily) {
-    NMConnectionFamilyOther = 0,
-    NMConnectionFamily4G,
-    NMConnectionFamily5G,
-};
-
-static NMConnectionFamily NMFamilyForConnectionType(int connectionType) {
-    switch (connectionType) {
-        case NMConnection4GOverride:
-        case NMConnectionLTE:
-        case NMConnectionLTEA:
-        case NMConnectionLTEPlus:
-        case NMConnection5GE:      // 5GE 实质是 LTE-A Pro，归入 4G 系列
-            return NMConnectionFamily4G;
-
-        case NMConnection5G:
-        case NMConnection5GPlus:
-        case NMConnection5GUWB:
-        case NMConnection5GUC:
-            return NMConnectionFamily5G;
-
-        default:
-            return NMConnectionFamilyOther;
-    }
-}
+//
+// 不再依赖 modemDataConnectionType 的枚举数值（iOS 各版本可能调整，且改枚举会污染真实网络状态），
+// 改为直接识别系统已经渲染出来的原生标识文本。这样与枚举取值完全解耦。
 
 #pragma mark - 偏好读取（按 mtime 缓存，避免每次刷新都解析 plist）
 
@@ -75,22 +38,43 @@ static NSDictionary *NMCurrentPreferences(void) {
 
 #pragma mark - 标识解析
 
-static NSString *NMReplacementStringForConnectionType(int connectionType) {
-    switch (NMFamilyForConnectionType(connectionType)) {
-        case NMConnectionFamily4G: {
-            NSDictionary *preferences = NMCurrentPreferences();
-            return NM4GLabelForValue([preferences[NMKey4GMode] integerValue],
-                                      preferences[NMKey4GCustom]);
-        }
-        case NMConnectionFamily5G: {
-            NSDictionary *preferences = NMCurrentPreferences();
-            return NM5GLabelForValue([preferences[NMKey5GMode] integerValue],
-                                      preferences[NMKey5GCustom]);
-        }
-        case NMConnectionFamilyOther:
-        default:
-            return nil;   // 3G / 2G / Wi-Fi 等一律不接管
+// 系统可能渲染出来的原生标识文本 → 归属哪个系列
+static BOOL NMIsFourGLabel(NSString *text) {
+    static NSSet<NSString *> *labels = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // 5GE 实质是 LTE-A Pro，归入 4G 系列
+        labels = [NSSet setWithArray:@[ @"4G", @"LTE", @"LTE-A", @"LTE+", @"5GE" ]];
+    });
+    return [labels containsObject:text];
+}
+
+static BOOL NMIsFiveGLabel(NSString *text) {
+    static NSSet<NSString *> *labels = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        labels = [NSSet setWithArray:@[ @"5G", @"5G+", @"5G UWB", @"5G UC" ]];
+    });
+    return [labels containsObject:text];
+}
+
+// 传入系统原本要显示的文本，返回本插件要替换成的文本；nil 表示不接管。
+static NSString *NMReplacementForNativeLabel(NSString *text) {
+    if (text.length == 0) {
+        return nil;
     }
+
+    NSDictionary *preferences = NMCurrentPreferences();
+
+    if (NMIsFourGLabel(text)) {
+        return NM4GLabelForValue([preferences[NMKey4GMode] integerValue],
+                                 preferences[NMKey4GCustom]);
+    }
+    if (NMIsFiveGLabel(text)) {
+        return NM5GLabelForValue([preferences[NMKey5GMode] integerValue],
+                                 preferences[NMKey5GCustom]);
+    }
+    return nil;   // 3G / E / GPRS 等一律不接管
 }
 
 #pragma mark - 字号归一
@@ -165,10 +149,12 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 
 #pragma mark - Hook
 
+// 第一层：系统计算标识文本时替换。
+// 判断依据是系统原本要显示的字符串，不依赖任何枚举数值。
 %hook _UIStatusBarCellularItem
 - (NSString *)_stringForCellularType:(int)connectionType {
     NSString *originalString = %orig;
-    NSString *replacementString = NMReplacementStringForConnectionType(connectionType);
+    NSString *replacementString = NMReplacementForNativeLabel(originalString);
     return replacementString.length > 0 ? replacementString : originalString;
 }
 %end
@@ -177,15 +163,23 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 %hook _UIStatusBarCellularCondensedItem
 - (NSString *)_stringForCellularType:(int)connectionType {
     NSString *originalString = %orig;
-    NSString *replacementString = NMReplacementStringForConnectionType(connectionType);
+    NSString *replacementString = NMReplacementForNativeLabel(originalString);
     return replacementString.length > 0 ? replacementString : originalString;
 }
 %end
 
-// 文本落地后统一字号，覆盖 4Gᴀ / 5Gᴀ / 自定义三种情况。
+// 第二层（兜底）：如果上面那条路在某个 iOS 版本上没被调用，
+// 就在文本真正落到视图时再替换一次，并统一字号。
+// 替换后的文本不是原生标识，所以不会和第一层互相叠加。
 %hook _UIStatusBarStringView
 - (void)setText:(NSString *)text {
-    %orig;
-    NMMatchNativeFontSize(self, text);
+    NSString *replacementString = NMReplacementForNativeLabel(text);
+    if (replacementString.length > 0) {
+        %orig(replacementString);
+        NMMatchNativeFontSize(self, replacementString);
+    } else {
+        %orig;
+        NMMatchNativeFontSize(self, text);
+    }
 }
 %end

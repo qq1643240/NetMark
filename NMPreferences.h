@@ -34,20 +34,18 @@
 
 #pragma mark - 选项定义
 
-// 4G 系列（LTE 属于 4G 制式，保留在 4G 组内）
+// 4G 系列。数值保持不变，删掉的 1(4G) / 2(LTE) 只是不再出现在选项表里，
+// 旧数据读到这两个值会回落到默认。
 enum {
     NM4GOptionDefault = 0,
-    NM4GOption4G      = 1,
-    NM4GOptionLTE     = 2,
     NM4GOption4GA     = 3,
     NM4GOption4GPlus  = 4,
     NM4GOptionCustom  = 99,
 };
 
-// 5G 系列
+// 5G 系列。同理删掉 1(5G)。
 enum {
     NM5GOptionDefault = 0,
-    NM5GOption5G      = 1,
     NM5GOption5GPlus  = 2,
     NM5GOption5GA     = 3,
     NM5GOption5GUWB   = 4,
@@ -58,22 +56,21 @@ enum {
 #pragma mark - 选项表（标题即最终显示文本）
 
 static inline NSArray<NSNumber *> *NM4GOptionValues(void) {
-    return @[ @(NM4GOptionDefault), @(NM4GOption4G), @(NM4GOptionLTE),
-              @(NM4GOption4GA), @(NM4GOption4GPlus), @(NM4GOptionCustom) ];
+    return @[ @(NM4GOptionDefault), @(NM4GOption4GA),
+              @(NM4GOption4GPlus), @(NM4GOptionCustom) ];
 }
 
 static inline NSArray<NSString *> *NM4GOptionTitles(void) {
-    return @[ @"默认", @"4G", @"LTE", @"4Gᴀ", @"4G+", @"自定义" ];
+    return @[ @"默认", @"4Gᴀ", @"4G+", @"自定义" ];
 }
 
 static inline NSArray<NSNumber *> *NM5GOptionValues(void) {
-    return @[ @(NM5GOptionDefault), @(NM5GOption5G), @(NM5GOption5GPlus),
-              @(NM5GOption5GA), @(NM5GOption5GUWB), @(NM5GOption5GUC),
-              @(NM5GOptionCustom) ];
+    return @[ @(NM5GOptionDefault), @(NM5GOption5GPlus), @(NM5GOption5GA),
+              @(NM5GOption5GUWB), @(NM5GOption5GUC), @(NM5GOptionCustom) ];
 }
 
 static inline NSArray<NSString *> *NM5GOptionTitles(void) {
-    return @[ @"默认", @"5G", @"5G+", @"5Gᴀ", @"5G UWB", @"5G UC", @"自定义" ];
+    return @[ @"默认", @"5G+", @"5Gᴀ", @"5G UWB", @"5G UC", @"自定义" ];
 }
 
 #pragma mark - 查询与解析
