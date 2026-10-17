@@ -164,16 +164,17 @@ static NMConnectionFamily NMFamilyForConnectionType(int connectionType) {
     }
 }
 
-// 把用户选择映射成系统枚举；0 表示没有对应项（自定义 / 默认）。
+// 把用户选择映射成系统枚举；0 表示保持原生（默认）。
 //
-// 这里不只是"选个标识"，还决定了状态栏用哪套样式属性：
+// 这里不只是"选个标识"，还决定了状态栏用哪套样式属性和槽位宽度：
 // 实测 type 11(5G) 用 .SFUI-Medium（常规宽度），type 12(5G+) 用 .SFUI-SemiCondensedMedium（半压缩），
-// type 14(5G UC) 又是另一套。所以 5Gᴀ 要借用 5G+ 的枚举，才能拿到半压缩字形和更宽的槽位。
+// type 14(5G UC) 又是另一套。所以自定义文本也要借一个更宽的枚举，槽位才够。
 static int NMEnumForMode(NSInteger mode, BOOL is4G) {
     if (is4G) {
         switch (mode) {
-            case NM4GOption4GA:    return NMConnectionLTEPlus;   // 借 LTE+ 的半压缩样式
-            case NM4GOption4GPlus: return NMConnectionLTEPlus;
+            case NM4GOption4GA:
+            case NM4GOption4GPlus:
+            case NM4GOptionCustom: return NMConnectionLTEPlus;   // 借 LTE+ 的样式与宽度
             default:               return 0;
         }
     }
@@ -182,6 +183,7 @@ static int NMEnumForMode(NSInteger mode, BOOL is4G) {
         case NM5GOption5GA:    return NMConnection5GPlus;    // 借 5G+ 的半压缩样式
         case NM5GOption5GUWB:  return NMConnection5GUWB;
         case NM5GOption5GUC:   return NMConnection5GUC;
+        case NM5GOptionCustom: return NMConnection5GUC;      // 借最宽的槽位
         default:               return 0;
     }
 }
@@ -308,7 +310,7 @@ static BOOL NMBlockTakesSingleInt(void *block) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.12 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.13 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -379,6 +381,24 @@ static BOOL NMBlockTakesSingleInt(void *block) {
                             preferences[NMKey4GMode], preferences[NMKey5GMode]]);
     }
     return targetType > 0 ? targetType : originalType;
+}
+%end
+
+// 运营商配置打开 LTEConnectionShows4G 时，iOS 会把 LTE / LTE-A / LTE+ 全部塌缩成 "4G"，
+// 4G 分组就永远拿不到 "LTE-A" / "LTE+" 这类可替换的原生文本（日志里 type 7->9 后仍显示 "4G" 就是这个原因）。
+// 只要用户在 4G 分组选了非「默认」，就关掉这个塌缩。
+%hook STTelephonyCarrierBundleInfo
+- (BOOL)LTEConnectionShows4G {
+    NSDictionary *preferences = NMCurrentPreferences();
+    BOOL overridden = ([preferences[NMKey4GMode] integerValue] != NM4GOptionDefault);
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"shows4G", [NSString stringWithFormat:@"LTEConnectionShows4G overridden=%d",
+                               overridden]);
+    }
+    if (overridden) {
+        return NO;
+    }
+    return %orig;
 }
 %end
 
