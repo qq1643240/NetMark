@@ -89,11 +89,10 @@ static BOOL NMIsSpringBoard(void) {
 }
 
 // 把状态栏相关类真实存在的方法列出来，用于确定 iOS 17 上该 hook 哪个方法。
+// 这次不过滤 "_" 开头的方法——宽度计算和字符串生成恰恰都在那些方法里。
 static void NMDumpStatusBarClasses(void) {
-    NSArray<NSString *> *names = @[ @"STUIStatusBarCellularNetworkTypeView",
-                                    @"STStatusBarDataNetworkEntry",
-                                    @"_UIStatusBarCellularItem",
-                                    @"_UIStatusBarStringView" ];
+    NSArray<NSString *> *names = @[ @"_UIStatusBarCellularItem",
+                                    @"STUIStatusBarCellularNetworkTypeView" ];
     for (NSString *name in names) {
         Class cls = objc_getClass(name.UTF8String);
         if (cls == Nil) {
@@ -105,21 +104,17 @@ static void NMDumpStatusBarClasses(void) {
         unsigned int count = 0;
         Method *methods = class_copyMethodList(cls, &count);
         for (unsigned int index = 0; index < count; index++) {
-            NSString *selector = NSStringFromSelector(method_getName(methods[index]));
-            if ([selector hasPrefix:@"_"]) {
-                continue;   // 跳过纯内部方法，减少噪音
-            }
-            [hits addObject:selector];
+            [hits addObject:NSStringFromSelector(method_getName(methods[index]))];
         }
         free(methods);
 
-        // 分成两行输出，避免单行被截断
+        // 分三行输出，避免单行过长被截断
         NSString *joined = [hits componentsJoinedByString:@" "];
-        NSUInteger half = joined.length / 2;
-        NSString *firstHalf = [joined substringToIndex:half];
-        NSString *secondHalf = [joined substringFromIndex:half];
-        NMLog(@"class %@ (%u) ① %@", name, count, firstHalf);
-        NMLog(@"class %@ (续) ② %@", name, secondHalf);
+        NSUInteger third = joined.length / 3;
+        NMLog(@"class %@ (%u) ① %@", name, count, [joined substringToIndex:third]);
+        NMLog(@"class %@ ② %@", name,
+              [joined substringWithRange:NSMakeRange(third, third)]);
+        NMLog(@"class %@ ③ %@", name, [joined substringFromIndex:third * 2]);
     }
 }
 
@@ -379,7 +374,7 @@ static BOOL NMBlockTakesSingleInt(void *block) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.10 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.11 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -571,7 +566,18 @@ withStyleAttributes:(id)attributes
                                         @"TypeView setText \"%@\" -> \"%@\" (prefix %lu 透传)",
                                         text, replacementString, (unsigned long)prefixLength]);
         }
+
+        // 记录替换前后的宽度：如果宽度没跟着文本变长而增加，说明槽位是按原生字符串定的
+        CGFloat widthBefore = self.frame.size.width;
         %orig(replacementString, prefixLength, attributes, type, animated);
+        if (NMIsInterestingProcess()) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                CGFloat widthAfter = self.frame.size.width;
+                NMLogOnce([NSString stringWithFormat:@"width-%@", replacementString],
+                          [NSString stringWithFormat:@"TypeView \"%@\" width %.1f -> %.1f",
+                           replacementString, widthBefore, widthAfter]);
+            });
+        }
         return;
     }
     %orig;
