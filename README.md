@@ -4,45 +4,24 @@
 
 - 名称：**NetMark**
 - 标识符：**`com.netmark.logo`**
-- 本分支为 5.0 重构版：**只保留 4G 与 5G**，新增 `4Gᴀ` / `5Gᴀ` 显示，并重做了设置界面。
+- 当前版本 **6.0.0**：只保留 4G 与 5G，支持 `4Gᴀ` / `4G+` / `5Gᴀ` / `5G+` / `5G UWB` / `5G UC` 与自定义文本
 
 > 由 [Data Logo Switcher](https://github.com/hirakujira/DataLogoSwitcher) 重构而来，MIT 协议与原作者署名保留。
 
 ## 更新记录
 
-**5.0.3** — 修复「选了没变化」。
+**6.0.0** — 稳定版
 
-5.0.2 把替换逻辑全放在字符串层（`_stringForCellularType:` / `-setText:`），实测在 iOS 17 上
-这条路径不生效；而上游原版靠改写 `modemDataConnectionType` 让系统自己渲染，是验证过可用的。
-本版恢复**双保险**：
+- `4Gᴀ` / `4G+` / `5Gᴀ` / 自定义 与原生标识渲染完全一致
+- 移除全部诊断日志与诊断分组，修复状态栏刷新卡顿
+- 偏好读取加 1 秒缓存，减少状态栏刷新时的磁盘访问
+- 新图标；设置页新增「当前状态」总览
 
-1. **枚举层**（`STTelephonySubscriptionContext -modemDataConnectionType`）：按选择把制式
-   改写成对应枚举（`4Gᴀ`→LTE-A、`4G+`→LTE+、`5G+`/`5G UWB`/`5G UC`→对应值），系统自己渲染。
-   这条即使字符串层失效也能看到变化。
-2. **字符串层**：把系统渲染出的原生标识替换成 `4Gᴀ` / `5Gᴀ` / 自定义等枚举表达不了的精确文本。
-   两层叠加，最终显示以字符串层为准。
-3. **偏好双路径**：同时写 `/var/mobile/...` 与 `ROOT_PATH_NS` 前缀路径，读取时取 mtime 最新的那份。
-   rootless / roothide 下两个进程对 `/var/mobile` 的可见性可能不同，双写双读兜住这种情况。
-4. 设置页底部在写入失败时会显示「⚠️ 设置写入失败」，不再静默。
+**5.0.x** — 逐层定位渲染问题：从枚举改写 → 字符串层 → `setOriginalText:` → `typeStringProvider`
+→ 最终确认入口是 `STUIStatusBarCellularNetworkTypeView`，细节见下方「渲染实现」。
 
-**5.0.2** — 修复「设置后状态栏没变化」。
-
-1. 替换依据从 `modemDataConnectionType` 枚举值改为**系统原生标识文本**。原实现把 6/7/8/9 当 4G、
-   11–14 当 5G，一旦 iOS 调整枚举顺序就整条失效；现在只认系统渲染出来的 `LTE` / `5G` 等字符串，
-   与枚举完全解耦。
-2. 增加第二层兜底：除了 `_stringForCellularType:`，还在 `_UIStatusBarStringView -setText:` 里
-   再替换一次。哪一层先命中都能生效，替换后的文本不是原生标识，两层不会互相叠加。
-3. 注销按钮改为从**自身 bundle 位置反推越狱根目录**（`.../Library/PreferenceBundles/NetMark.bundle`
-   往上三层），rootless 得到 `/var/jb`、roothide 得到 `.jbroot-XXXX`、rootful 得到 `/`。
-   原先依赖 `ROOT_PATH_NS`，在 roothide 下拿不到正确路径，点了等于没点。找不到 `sbreload` /
-   `killall` 时会弹窗提示，不再静默失败。
-4. 移除 `4G` / `LTE` / `5G` 三个选项（等同系统默认或已被 `4Gᴀ` / `4G+` / `5G+` 覆盖）。
-   旧数据里选过这三项会自动回落到「默认」。
-
-**5.0.1** — 修复进入设置页闪退。`PSListController` 在 `controllerForSpecifier:` 中会直接给
-detail 控制器发 `setSpecifier:` / `setRootController:` / `setParentController:`，
-设置页原先继承 `UIViewController`，收到未知 selector 触发 `unrecognized selector` → `SIGABRT`。
-现改为继承 `PSViewController`，并链接 Preferences 私有框架。
+**5.0.1** — 修复进入设置页闪退：`PSListController` 会给 detail 控制器发 `setSpecifier:` 等
+`PSViewController` 接口，设置页改为继承 `PSViewController`。
 
 **5.0.0** — 重构：只保留 4G / 5G，新增 `4Gᴀ` / `5Gᴀ`，重做设置界面，改名 NetMark。
 
@@ -59,33 +38,32 @@ detail 控制器发 `setSpecifier:` / `setRootController:` / `setParentControlle
 - **同字号**：`4Gᴀ`、`5Gᴀ` 与自定义文本都按状态栏原生标识的字号渲染，不会被系统压小。
 - 只接管 4G / 5G 两种制式，3G、2G、Wi-Fi 一律不干预。
 
-## 实现方式
+## 渲染实现（iOS 17）
 
-在状态栏文本层替换显示字符串：
+状态栏标识不是普通文本，它由三层共同决定。改任何一层都不够，必须三层对齐：
 
-```objc
-%hook _UIStatusBarCellularItem
-- (NSString *)_stringForCellularType:(int)connectionType { ... }
-%end
-```
+| 层 | 位置 | 作用 |
+| --- | --- | --- |
+| 制式枚举 | `STTelephonySubscriptionContext -modemDataConnectionType` | 决定用哪套样式属性与槽位宽度 |
+| 运营商开关 | `STTelephonyCarrierBundleInfo -LTEConnectionShows4G` | 为 YES 时把 LTE / LTE-A / LTE+ 全塌缩成 `4G` |
+| 文本渲染 | `STUIStatusBarCellularNetworkTypeView -setText:prefixLength:withStyleAttributes:forType:animated:` | 把标识拆成 `prefixLabel` + `accessoryLabel` 两段分别渲染 |
 
-同时接管 `_UIStatusBarCellularCondensedItem`，保证刘海屏 / 灵动岛的紧凑布局显示一致。
+关键点：
 
-**不再改写 `modemDataConnectionType`**，因此不会伪造真实网络状态，也不影响系统对网络类型的其它判断。
-
-### 字号对齐
-
-`_UIStatusBarStringView` 在文本变宽时会自动缩小字号，导致自定义文本比原生标识小一圈。
-插件在 `setText:` 之后：
-
-1. 记录系统渲染原生标识时使用的字号（首次见到非本插件文本时采样）；
-2. 对 `4Gᴀ` / `5Gᴀ` / 自定义文本强制使用同一字号；
-3. 关闭 `adjustsFontSizeToFitWidth`，避免长文本被再次压小。
+1. **字体由枚举决定**。`type 11(5G)` → `.SFUI-Medium`（常规宽度）；`type 12(5G+)` →
+   `.SFUI-SemiCondensedMedium`（半压缩），槽位也更宽。所以 `5Gᴀ` 借用 `5G+` 的枚举，
+   才能拿到同款字形与足够宽度。
+2. **`prefixLength` 决定拆分位置**。`2` 表示 `5G` + 后缀（后缀走小字号），
+   `NSNotFound` 表示整串不拆。要和 `5G+` 一致就传 `2`。
+3. **4G 不要改枚举**。实测 `type 9(LTE+)` 在部分运营商配置下不可渲染，状态栏会显示 `?`。
+   4G 靠 `LTEConnectionShows4G = NO` 让系统渲染标准 `LTE`，再替换文本。
+4. **不要在 `UILabel` 上兜底替换**。视图拆好 `prefixLabel` 之后，再改它的文本会把结构揉乱。
 
 ## 界面
 
 设置页是一个原生 `UITableViewStyleInsetGrouped` 列表，外观与系统设置页一致，没有任何自绘视图：
 
+- 顶部「当前状态」总览：两行直接显示 4G / 5G 现在会渲染成什么
 - 两个分组（`4G / LTE`、`5G`），组内逐项列出可选标识，右侧对勾表示当前选择
 - 选中「自定义」时在组内追加一行输入框，自动聚焦
 - 分组底部说明实时反映当前标识（如「4G / LTE 网络下显示「4Gᴀ」。」）

@@ -2,7 +2,7 @@
 //  NetMark.m
 //  NetMark 设置面板
 //
-//  原生 insetGrouped 列表：勾选式选项 + 行内自定义输入 + 居中文字按钮。
+//  原生 insetGrouped 列表：顶部状态总览 + 两个制式分组 + 底部操作行。
 //  不使用任何自绘视图，外观完全跟随系统设置页。
 //
 
@@ -11,52 +11,15 @@
 
 static NSString *const kNMOptionCellIdentifier = @"NMOptionCell";
 static NSString *const kNMActionCellIdentifier = @"NMActionCell";
+static NSString *const kNMStatusCellIdentifier = @"NMStatusCell";
 
 typedef NS_ENUM(NSInteger, NMSection) {
-    NMSection4G = 0,
+    NMSectionStatus = 0,
+    NMSection4G,
     NMSection5G,
     NMSectionAction,
-    NMSectionDiagnostics,
     NMSectionCount
 };
-
-// 诊断日志由 tweak 写入 /tmp（并兜底写到偏好目录），设置页读取较新的那份。正式版会移除。
-static NSString *const kNMDebugLogPath = @"/tmp/netmark.log";
-static NSString *const kNMDebugLogPathAlt = @"/var/mobile/Library/Preferences/netmark.log";
-
-static NSString *NMReadLogTail(void) {
-    NSString *newestContent = nil;
-    NSTimeInterval newestStamp = -1;
-    for (NSString *path in @[ kNMDebugLogPath, kNMDebugLogPathAlt ]) {
-        NSDictionary *attributes = [[NSFileManager defaultManager]
-                                    attributesOfItemAtPath:path error:NULL];
-        NSDate *modifiedDate = attributes[NSFileModificationDate];
-        NSTimeInterval stamp = modifiedDate ? [modifiedDate timeIntervalSinceReferenceDate] : 0;
-        if (stamp <= newestStamp) {
-            continue;
-        }
-        NSString *content = [NSString stringWithContentsOfFile:path
-                                                      encoding:NSUTF8StringEncoding
-                                                         error:NULL];
-        if (content.length > 0) {
-            newestContent = content;
-            newestStamp = stamp;
-        }
-    }
-
-    if (newestContent.length == 0) {
-        return @"暂无日志。若已注销仍为空，说明 tweak 没注入到 SpringBoard。";
-    }
-    NSArray<NSString *> *lines = [newestContent componentsSeparatedByString:@"\n"];
-    NSUInteger start = lines.count > 16 ? lines.count - 16 : 0;
-    NSMutableArray<NSString *> *tail = [NSMutableArray array];
-    for (NSUInteger index = start; index < lines.count; index++) {
-        if (lines[index].length > 0) {
-            [tail addObject:lines[index]];
-        }
-    }
-    return tail.count > 0 ? [tail componentsJoinedByString:@"\n"] : @"日志为空。";
-}
 
 #pragma mark - 偏好读写
 
@@ -275,7 +238,6 @@ static BOOL NMRespringDevice(void) {
                                              selector:@selector(keyboardWillChangeFrame:)
                                                  name:UIKeyboardWillChangeFrameNotification
                                                object:nil];
-    [self.tableView reloadData];   // 刷新诊断日志
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -311,7 +273,10 @@ static BOOL NMRespringDevice(void) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == NMSectionAction || section == NMSectionDiagnostics) {
+    if (section == NMSectionStatus) {
+        return 2;
+    }
+    if (section == NMSectionAction) {
         return 1;
     }
     NSInteger count = (NSInteger)[self optionValuesForSection:section].count;
@@ -328,13 +293,13 @@ static BOOL NMRespringDevice(void) {
     if (section == NMSection5G) {
         return @"5G";
     }
-    if (section == NMSectionDiagnostics) {
-        return @"诊断日志";
-    }
     return nil;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (section == NMSectionStatus) {
+        return @"仅调整状态栏显示的标识，不改变真实网络制式。";
+    }
     if (section == NMSection4G) {
         NSString *label = NM4GLabelForValue(self.mode4G, self.custom4G);
         return label ? [NSString stringWithFormat:@"4G / LTE 网络下显示「%@」。", label]
@@ -345,9 +310,6 @@ static BOOL NMRespringDevice(void) {
         return label ? [NSString stringWithFormat:@"5G 网络下显示「%@」。", label]
                      : @"5G 网络下跟随系统显示。";
     }
-    if (section == NMSectionDiagnostics) {
-        return NMReadLogTail();
-    }
     if (!self.writeSucceeded) {
         return @"⚠️ 设置写入失败，请检查越狱环境或磁盘权限。";
     }
@@ -355,20 +317,11 @@ static BOOL NMRespringDevice(void) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == NMSectionStatus) {
+        return [self statusCellForRow:indexPath.row tableView:tableView];
+    }
     if (indexPath.section == NMSectionAction) {
         return [self actionCellForTableView:tableView];
-    }
-    if (indexPath.section == NMSectionDiagnostics) {
-        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"NMDiagnosticsCell"];
-        if (cell == nil) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                          reuseIdentifier:@"NMDiagnosticsCell"];
-            cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-            cell.textLabel.textAlignment = NSTextAlignmentCenter;
-        }
-        cell.textLabel.text = @"刷新日志";
-        cell.textLabel.textColor = self.view.tintColor;
-        return cell;
     }
 
     NSArray<NSNumber *> *values = [self optionValuesForSection:indexPath.section];
@@ -397,12 +350,11 @@ static BOOL NMRespringDevice(void) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-    if (indexPath.section == NMSectionAction) {
-        [self respring];
+    if (indexPath.section == NMSectionStatus) {
         return;
     }
-    if (indexPath.section == NMSectionDiagnostics) {
-        [tableView reloadData];
+    if (indexPath.section == NMSectionAction) {
+        [self respring];
         return;
     }
 
@@ -425,6 +377,8 @@ static BOOL NMRespringDevice(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [tableView reloadSections:[NSIndexSet indexSetWithIndex:(NSUInteger)indexPath.section]
                  withRowAnimation:UITableViewRowAnimationAutomatic];
+        [tableView reloadSections:[NSIndexSet indexSetWithIndex:NMSectionStatus]
+                 withRowAnimation:UITableViewRowAnimationNone];
 
         if (needsFocus) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
@@ -437,6 +391,31 @@ static BOOL NMRespringDevice(void) {
 }
 
 #pragma mark 单元格
+
+// 顶部总览：左侧制式，右侧当前会显示成什么
+- (UITableViewCell *)statusCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kNMStatusCellIdentifier];
+    if (cell == nil) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1
+                                      reuseIdentifier:kNMStatusCellIdentifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        cell.detailTextLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    }
+
+    if (row == 0) {
+        NSString *label = NM4GLabelForValue(self.mode4G, self.custom4G);
+        cell.textLabel.text = @"4G / LTE";
+        cell.detailTextLabel.text = label ?: @"跟随系统";
+        cell.detailTextLabel.textColor = label ? [UIColor labelColor] : [UIColor secondaryLabelColor];
+    } else {
+        NSString *label = NM5GLabelForValue(self.mode5G, self.custom5G);
+        cell.textLabel.text = @"5G";
+        cell.detailTextLabel.text = label ?: @"跟随系统";
+        cell.detailTextLabel.textColor = label ? [UIColor labelColor] : [UIColor secondaryLabelColor];
+    }
+    return cell;
+}
 
 - (UITableViewCell *)actionCellForTableView:(UITableView *)tableView {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kNMActionCellIdentifier];
@@ -527,10 +506,9 @@ static BOOL NMRespringDevice(void) {
     [self customTextDidChange:field];
     [self persistPreferences];
 
-    NSInteger section = (field == self.custom4GField) ? NMSection4G : NMSection5G;
-    // 等输入框事件走完再刷新该分组，用于更新底部说明中的当前标识
+    // 等输入框事件走完再刷新，用于更新分组说明与顶部总览
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:(NSUInteger)section]
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:NMSectionStatus]
                      withRowAnimation:UITableViewRowAnimationNone];
     });
 }
