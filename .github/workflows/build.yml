@@ -15,8 +15,12 @@ concurrency:
 
 jobs:
   build:
-    name: Build deb (rootful + rootless)
+    name: Build (${{ matrix.scheme }})
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        scheme: [rootless, roothide]
     env:
       SDK_VERSION: "14.5"
 
@@ -27,9 +31,14 @@ jobs:
       - name: Install build dependencies
         run: brew install ldid xz dpkg
 
-      - name: Install Theos
+      # roothide 的打包 scheme 只存在于 roothide/theos 分支，
+      # 它同时兼容 rootful / rootless / roothide 三种方案。
+      - name: Install Theos (roothide fork)
         run: |
-          git clone --depth 1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          git clone --depth 1 https://github.com/roothide/theos.git "$HOME/theos"
+          cd "$HOME/theos"
+          git submodule update --init --recursive --depth 1 \
+            || git submodule update --init --recursive
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
 
@@ -45,29 +54,29 @@ jobs:
       - name: Show toolchain
         run: |
           echo "THEOS=$THEOS"
+          echo "SCHEME=${{ matrix.scheme }}"
           xcodebuild -version
           ldid -v || true
           dpkg-deb --version | head -1
 
-      - name: Build rootful
+      - name: Build
         run: |
-          make package FINALPACKAGE=1
-          mkdir -p out/rootful
-          mv packages/*.deb out/rootful/
+          make package THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} FINALPACKAGE=1
+          mkdir -p out
+          mv packages/*.deb out/
 
-      - name: Build rootless
+      - name: Inspect package
         run: |
-          make clean
-          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
-          mkdir -p out/rootless
-          mv packages/*.deb out/rootless/
+          ls -lh out/
+          for deb in out/*.deb; do
+            echo "--- $deb"
+            dpkg-deb -f "$deb" Package Version Architecture Depends
+            dpkg-deb -c "$deb" | awk '{print $6}' | head -12
+          done
 
-      - name: List packages
-        run: find out -name '*.deb' -exec ls -lh {} \;
-
-      - name: Upload packages
+      - name: Upload package
         uses: actions/upload-artifact@v4
         with:
-          name: NetMark-deb
-          path: out/**/*.deb
+          name: NetMark-${{ matrix.scheme }}
+          path: out/*.deb
           if-no-files-found: error

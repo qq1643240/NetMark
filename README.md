@@ -56,12 +56,13 @@
 
 ## 编译
 
-需要 Theos（macOS / Linux / WSL）与 iOS SDK 14.5：
+需要 **roothide/theos**（上游 theos 不含 roothide 打包方案，该分支兼容 rootful / rootless / roothide）
+与 iOS SDK 14.5：
 
 ```sh
-make package FINALPACKAGE=1                          # rootful
-make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1   # rootless
-./build.sh                                           # 两种一起出包
+make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1   # 无根
+make package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1   # 隐根
+make package FINALPACKAGE=1                                 # 有根（旧设备）
 ```
 
 产物位于 `packages/`。部署目标 iOS 13.0，架构 arm64 / arm64e。
@@ -70,13 +71,25 @@ make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1   # rootless
 
 ## 云端编译
 
-仓库自带 GitHub Actions 工作流（`.github/workflows/build.yml`），在 macOS 上自动装 Theos 与
-iPhoneOS14.5 SDK，依次产出 rootful 与 rootless 两个 deb：
+仓库自带 GitHub Actions 工作流（`.github/workflows/build.yml`），在 macOS 上自动装
+roothide/theos 与 iPhoneOS14.5 SDK，用 matrix 并行产出两种包：
+
+| scheme | 产物 | 适用越狱 |
+| --- | --- | --- |
+| `rootless` | `com.netmark.logo_5.0.0_iphoneos-arm64.deb` | 无根（Dopamine / palera1n rootless），装到 `/var/jb` |
+| `roothide` | `com.netmark.logo_5.0.0_iphoneos-arm64e.deb` | 隐根（roothide Bootstrap），路径由 `jbroot()` 运行时解析 |
 
 - 触发条件：推送到 `master` / `main`、PR、或手动 `Run workflow`
-- 产物：Actions 运行页底部的 `NetMark-deb` artifact，内含
-  `com.netmark.logo_5.0.0_iphoneos-arm.deb` 与 `..._iphoneos-arm64.deb`
+- 产物：Actions 运行页底部的 `NetMark-rootless` / `NetMark-roothide` 两个 artifact
 - 本地不需要任何 iOS 开发环境
+
+### 两种越狱的差异
+
+- **无根（rootless）**：编译期把 `/var/jb` 写进包路径，二进制链接 `libroot`。
+- **隐根（roothide）**：`THEOS_PACKAGE_SCHEME=roothide` 时 `ROOT_PATH_NS` 被重定义为
+  `jbroot()`，路径在运行时解析，因此同一个 `jbroot` 位置不同的设备都能用；
+  包内文件路径不带 `/var/jb` 前缀。
+- 本插件的设置数据写在 `/var/mobile/Library/Preferences/`，属于用户数据，两种越狱下位置一致。
 
 ## 设置存储
 
