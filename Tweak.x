@@ -164,19 +164,17 @@ static NMConnectionFamily NMFamilyForConnectionType(int connectionType) {
     }
 }
 
-// 把用户选择映射成系统枚举；0 表示保持原生（默认）。
+// 把用户选择映射成系统枚举；0 表示保持原生。
 //
 // 这里不只是"选个标识"，还决定了状态栏用哪套样式属性和槽位宽度：
 // 实测 type 11(5G) 用 .SFUI-Medium（常规宽度），type 12(5G+) 用 .SFUI-SemiCondensedMedium（半压缩），
 // type 14(5G UC) 又是另一套。所以自定义文本也要借一个更宽的枚举，槽位才够。
+//
+// 4G 侧一律返回 0：实测 type 9(LTE+) 在这台设备的运营商配置下不可渲染，状态栏直接显示 "?"。
+// 4G 改用「LTEConnectionShows4G = NO」让系统渲染出标准的 "LTE"，再替换成 4Gᴀ / 4G+。
 static int NMEnumForMode(NSInteger mode, BOOL is4G) {
     if (is4G) {
-        switch (mode) {
-            case NM4GOption4GA:
-            case NM4GOption4GPlus:
-            case NM4GOptionCustom: return NMConnectionLTEPlus;   // 借 LTE+ 的样式与宽度
-            default:               return 0;
-        }
+        return 0;
     }
     switch (mode) {
         case NM5GOption5GPlus: return NMConnection5GPlus;
@@ -310,7 +308,7 @@ static BOOL NMBlockTakesSingleInt(void *block) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.13 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.14 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -429,6 +427,13 @@ static BOOL NMBlockTakesSingleInt(void *block) {
 withStyleAttributes:(id)attributes
         forType:(int)type
        animated:(BOOL)animated {
+    // 记录每一个不同的原始文本，便于看清系统到底给了什么（例如 "?" 这种占位符）
+    if (NMIsInterestingProcess()) {
+        NMLogOnce([NSString stringWithFormat:@"in-%@", text],
+                  [NSString stringWithFormat:@"TypeView in \"%@\" prefix=%lu type=%d",
+                   text, (unsigned long)prefixLength, type]);
+    }
+
     NSString *replacementString = NMReplacementForNativeLabel(text);
     if (replacementString.length == 0 || [replacementString isEqualToString:text]) {
         %orig;
