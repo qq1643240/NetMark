@@ -122,6 +122,30 @@ static NSUInteger NMPrefixLengthForLabel(NSString *label) {
     return label.length;
 }
 
+static BOOL NMIsSpringBoard(void) {
+    static BOOL isSpringBoard = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        isSpringBoard = [[NSProcessInfo processInfo].processName isEqualToString:@"SpringBoard"];
+    });
+    return isSpringBoard;
+}
+
+// 状态栏那个视图已经把标识拆成 prefixLabel + accessoryLabel，
+// 再动它内部的 UILabel 会把拆分结构揉乱，所以这里要排除掉。
+static BOOL NMIsInsideNetworkTypeView(UIView *view) {
+    Class typeViewClass = objc_getClass("STUIStatusBarCellularNetworkTypeView");
+    if (typeViewClass == Nil) {
+        return NO;
+    }
+    for (UIView *superview = view.superview; superview != nil; superview = superview.superview) {
+        if ([superview isKindOfClass:typeViewClass]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 #pragma mark - 制式枚举
 
 typedef NS_ENUM(int, NMConnectionType) {
@@ -262,8 +286,48 @@ withStyleAttributes:(id)attributes
     }
 
     NSMutableAttributedString *newText = [text mutableCopy];
-    [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
+    [newText replaceCharactersInRange:NSMakeRange(0, text.length)
                            withString:replacementString];
     %orig(newText, NMPrefixLengthForLabel(replacementString), type, animated);
+}
+%end
+
+// 控制中心 / 通知中心里的运营商行走的是另一套视图，不会经过上面那个 NetworkTypeView，
+// 于是会原样显示枚举对应的原生文本（借了 5G+ 的枚举就显示 "5G+"）。
+// 这里补一层 UILabel 兜底：只处理 SpringBoard 内、且不在 NetworkTypeView 里的原生标识，
+// 避免又去动状态栏那个已经拆好两段的标签。
+%hook UILabel
+- (void)setText:(NSString *)text {
+    if (NMIsSpringBoard() &&
+        (NMIsFourGLabel(text) || NMIsFiveGLabel(text)) &&
+        !NMIsInsideNetworkTypeView(self)) {
+        NSString *replacementString = NMReplacementForNativeLabel(text);
+        if (replacementString.length > 0 && ![replacementString isEqualToString:text]) {
+            UIFont *font = self.font;
+            %orig(replacementString);
+            if (font != nil) {
+                self.font = font;   // 保住原生字体，避免字重被重置
+            }
+            return;
+        }
+    }
+    %orig;
+}
+
+- (void)setAttributedText:(NSAttributedString *)text {
+    NSString *string = text.string;
+    if (NMIsSpringBoard() &&
+        (NMIsFourGLabel(string) || NMIsFiveGLabel(string)) &&
+        !NMIsInsideNetworkTypeView(self)) {
+        NSString *replacementString = NMReplacementForNativeLabel(string);
+        if (replacementString.length > 0 && ![replacementString isEqualToString:string]) {
+            NSMutableAttributedString *newText = [text mutableCopy];
+            [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
+                                   withString:replacementString];
+            %orig(newText);
+            return;
+        }
+    }
+    %orig;
 }
 %end
