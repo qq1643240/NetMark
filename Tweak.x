@@ -568,11 +568,12 @@ withStyleAttributes:(id)attributes
         }
 
         // 记录替换前后的宽度：如果宽度没跟着文本变长而增加，说明槽位是按原生字符串定的
-        CGFloat widthBefore = self.frame.size.width;
+        UIView *containerView = (UIView *)self;
+        CGFloat widthBefore = containerView.frame.size.width;
         %orig(replacementString, prefixLength, attributes, type, animated);
         if (NMIsInterestingProcess()) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                CGFloat widthAfter = self.frame.size.width;
+                CGFloat widthAfter = containerView.frame.size.width;
                 NMLogOnce([NSString stringWithFormat:@"width-%@", replacementString],
                           [NSString stringWithFormat:@"TypeView \"%@\" width %.1f -> %.1f",
                            replacementString, widthBefore, widthAfter]);
