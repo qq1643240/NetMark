@@ -272,6 +272,16 @@ static NSString *NMReplacementForNativeLabel(NSString *text) {
     return nil;   // 3G / E / GPRS 等一律不接管
 }
 
+// 状态栏把标识拆成「前缀 + 附属」两段渲染（"5G UC" = "5G" + "UC"，附属字号更小）。
+// 我们的标识沿用同一拆分规则：4G / 5G 开头时前缀取 2 个字符，其余整串作为前缀。
+static NSUInteger NMPrefixLengthForLabel(NSString *label) {
+    if (label.length > 2 &&
+        ([label hasPrefix:@"4G"] || [label hasPrefix:@"5G"])) {
+        return 2;
+    }
+    return label.length;
+}
+
 #pragma mark - 字号归一
 
 // 状态栏文本视图在文本变宽时会自动缩小字号，导致 4Gᴀ / 5Gᴀ / 自定义文本
@@ -379,7 +389,7 @@ static BOOL NMBlockTakesSingleInt(void *block) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.8 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.9 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -555,29 +565,48 @@ static BOOL NMBlockTakesSingleInt(void *block) {
 // 真正的容器：SystemStatusUI 的 STUIStatusBarCellularNetworkTypeView。
 // 5G+ / 5G UC 之所以渲染正常，是因为字符串由枚举层产生、直接进到这个视图，
 // 由它按原生规则排版；在 UILabel 上改字会绕过这一步。
-// 如果它有 setText: / setString:，在这里替换就能拿到正确排版。
+//
+// 这个视图把标识拆成「前缀 + 附属」两段分别渲染（prefixLabel / accessoryLabel），
+// "5G UC" 就是 "5G" + "UC"。所以必须在它自己的入口换字符串并重算 prefixLength，
+// 否则只会改到其中一段，观感自然对不上。
 %hook STUIStatusBarCellularNetworkTypeView
-- (void)setText:(NSString *)text {
+- (void)setText:(NSString *)text
+   prefixLength:(NSUInteger)prefixLength
+withStyleAttributes:(id)attributes
+        forType:(int)type
+       animated:(BOOL)animated {
     NSString *replacementString = NMReplacementForNativeLabel(text);
-    if (NMIsInterestingProcess()) {
-        NMLogOnce(@"typeViewText", [NSString stringWithFormat:@"TypeView setText \"%@\" -> \"%@\"",
-                                    text, replacementString ?: @"nil"]);
-    }
     if (replacementString.length > 0) {
-        %orig(replacementString);
+        NSUInteger newPrefixLength = NMPrefixLengthForLabel(replacementString);
+        if (NMIsInterestingProcess()) {
+            NMLogOnce(@"typeViewText", [NSString stringWithFormat:
+                                        @"TypeView setText \"%@\"(prefix %lu) -> \"%@\"(prefix %lu)",
+                                        text, (unsigned long)prefixLength,
+                                        replacementString, (unsigned long)newPrefixLength]);
+        }
+        %orig(replacementString, newPrefixLength, attributes, type, animated);
         return;
     }
     %orig;
 }
 
-- (void)setString:(NSString *)string {
+- (void)setAttributedText:(NSAttributedString *)text
+             prefixLength:(NSUInteger)prefixLength
+                  forType:(int)type
+                 animated:(BOOL)animated {
+    NSString *string = text.string;
     NSString *replacementString = NMReplacementForNativeLabel(string);
-    if (NMIsInterestingProcess()) {
-        NMLogOnce(@"typeViewString", [NSString stringWithFormat:@"TypeView setString \"%@\" -> \"%@\"",
-                                      string, replacementString ?: @"nil"]);
-    }
     if (replacementString.length > 0) {
-        %orig(replacementString);
+        NSMutableAttributedString *newText = [text mutableCopy];
+        [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
+                               withString:replacementString];
+        NSUInteger newPrefixLength = NMPrefixLengthForLabel(replacementString);
+        if (NMIsInterestingProcess()) {
+            NMLogOnce(@"typeViewAttr", [NSString stringWithFormat:
+                                        @"TypeView setAttributedText \"%@\" -> \"%@\"(prefix %lu)",
+                                        string, replacementString, (unsigned long)newPrefixLength]);
+        }
+        %orig(newText, newPrefixLength, type, animated);
         return;
     }
     %orig;
