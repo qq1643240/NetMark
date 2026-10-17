@@ -12,6 +12,7 @@
 #import <math.h>
 #import <unistd.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import "NMPreferences.h"
 
 #pragma mark - 诊断日志
@@ -343,6 +344,33 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 
 #pragma mark - Hook
 
+// 读取 block 的签名（libclosure 的私有函数，用 dlsym 取，避免链接依赖）
+static const char *NMBlockSignature(void *block) {
+    static const char *(*signatureFunction)(void *) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        signatureFunction = (const char *(*)(void *))dlsym(RTLD_DEFAULT, "_Block_signature");
+    });
+    return signatureFunction ? signatureFunction(block) : NULL;
+}
+
+// 只在签名明确是 "返回对象、单个 int 参数" 时才包装，避免调用约定不符导致崩溃
+static BOOL NMBlockTakesSingleInt(void *block) {
+    const char *signature = NMBlockSignature(block);
+    if (signature == NULL) {
+        return NO;
+    }
+    NSString *text = @(signature);
+    NSRange open = [text rangeOfString:@"<"];
+    NSRange close = [text rangeOfString:@">"];
+    if (open.location == NSNotFound || close.location == NSNotFound || close.location <= open.location) {
+        return NO;
+    }
+    NSString *inner = [text substringWithRange:NSMakeRange(open.location + 1,
+                                                           close.location - open.location - 1)];
+    return [inner isEqualToString:@"@?i"];
+}
+
 %ctor {
     if (NMIsInterestingProcess()) {
         // SpringBoard 启动时清空日志，保证每次注销后是一份干净的记录
@@ -351,7 +379,7 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.6 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.7 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -360,6 +388,42 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
         }
     }
 }
+
+// 数据源头：iOS 17 的 _UIStatusBarCellularItem 用 typeStringProvider 这个 block 提供标识文本，
+// _stringForCellularType: 只是遗留方法、不再被调用。
+// 在源头替换，状态栏会按新字符串重新计算宽度，排版才和原生一致。
+%hook _UIStatusBarCellularItem
+- (void)setTypeStringProvider:(id)provider {
+    if (provider != nil) {
+        const char *signature = NMBlockSignature((__bridge void *)provider);
+        NMLogOnce(@"provider", [NSString stringWithFormat:@"typeStringProvider sig=%s wrapped=%d",
+                                signature ?: "(null)", NMBlockTakesSingleInt((__bridge void *)provider)]);
+
+        if (NMBlockTakesSingleInt((__bridge void *)provider)) {
+            NSString *(^originalProvider)(int) = (NSString *(^)(int))provider;
+            NSString *(^wrappedProvider)(int) = ^NSString *(int type) {
+                NSString *value = originalProvider(type);
+                NSString *replacement = NMReplacementForNativeLabel(value);
+                return replacement.length > 0 ? replacement : value;
+            };
+            %orig(wrappedProvider);
+            return;
+        }
+    }
+    %orig;
+}
+
+// 遗留方法，iOS 17 上已不被调用，保留给旧系统。
+- (NSString *)_stringForCellularType:(int)connectionType {
+    NSString *originalString = %orig;
+    NSString *replacementString = NMReplacementForNativeLabel(originalString);
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"cellItem", [NSString stringWithFormat:@"cellItem type=%d \"%@\" -> \"%@\"",
+                                connectionType, originalString, replacementString ?: @"nil"]);
+    }
+    return replacementString.length > 0 ? replacementString : originalString;
+}
+%end
 
 // 枚举层：把当前制式改写成用户选择对应的系统枚举，
 // 让系统自己渲染出 LTE-A / LTE+ / 5G UC 这类原生标识。
@@ -386,20 +450,6 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
                             preferences[NMKey4GMode], preferences[NMKey5GMode]]);
     }
     return targetType > 0 ? targetType : originalType;
-}
-%end
-
-// 字符串层（第一层）：系统计算标识文本时替换。
-// 判断依据是系统原本要显示的字符串，不依赖任何枚举数值。
-%hook _UIStatusBarCellularItem
-- (NSString *)_stringForCellularType:(int)connectionType {
-    NSString *originalString = %orig;
-    NSString *replacementString = NMReplacementForNativeLabel(originalString);
-    if (NMIsInterestingProcess()) {
-        NMLogOnce(@"cellItem", [NSString stringWithFormat:@"cellItem type=%d \"%@\" -> \"%@\"",
-                                connectionType, originalString, replacementString ?: @"nil"]);
-    }
-    return replacementString.length > 0 ? replacementString : originalString;
 }
 %end
 
@@ -450,7 +500,10 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
 %end
 
 // 第三层兜底：文本最终落到 UILabel 时再替换一次。
-// 关键是要保住原生字体——否则替换后的文本会用默认字体渲染，与其它状态栏文字对不上。
+// 关键有两点：
+//   1. 保住原生字体对象，否则字重会被重置；
+//   2. 让承载它的 _UIStatusBarStringView 按新文本重新算宽度，
+//      否则状态栏仍按原生字符串（如 "5G"）分配的宽度，多出来的字符会被挤压。
 %hook UILabel
 - (void)setText:(NSString *)text {
     if (NMIsSpringBoard() && NMIsNativeNetworkLabel(text)) {
@@ -462,16 +515,19 @@ static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
             %orig(replacementString);
 
             if (nativeFont != nil) {
-                self.font = nativeFont;   // 沿用原生文本的字体，避免字号/字重被重置
+                self.font = nativeFont;
             }
-            self.adjustsFontSizeToFitWidth = NO;
-            self.minimumScaleFactor = 1.0;
+
+            UIView *container = self.superview;
+            [container invalidateIntrinsicContentSize];
+            [container setNeedsLayout];
 
             NMLogOnce(@"uilabel", [NSString stringWithFormat:
-                                   @"UILabel \"%@\" -> \"%@\" font=%.1f/%.1f bounds=%.0fx%.0f",
-                                   text, replacementString,
+                                   @"UILabel \"%@\" -> \"%@\" font=%@ %.1f/%.1f bounds=%.0fx%.0f container=%@",
+                                   text, replacementString, nativeFont.fontName,
                                    nativeFont.pointSize, self.font.pointSize,
-                                   nativeSize.width, nativeSize.height]);
+                                   nativeSize.width, nativeSize.height,
+                                   NSStringFromClass([container class])]);
             return;
         }
     }
