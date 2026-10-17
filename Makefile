@@ -10,6 +10,12 @@ FINALPACKAGE = 1
 TARGET = iphone:clang:14.5:13.0
 ARCHS = arm64 arm64e
 
+# roothide 方案下 ROOT_PATH_NS 由 rootless-compat.h 映射到 jbroot()，
+# 这是有意使用的兼容写法，按官方文档关掉提示。
+ifeq ($(THEOS_PACKAGE_SCHEME),roothide)
+	NetMark_CFLAGS += -DDISABLE_ROOTLESS_COMPAT_WARNING
+endif
+
 SUBPROJECTS += NetMarkSettings
 
 include $(THEOS)/makefiles/common.mk
