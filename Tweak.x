@@ -165,17 +165,21 @@ static NMConnectionFamily NMFamilyForConnectionType(int connectionType) {
 }
 
 // 把用户选择映射成系统枚举；0 表示没有对应项（自定义 / 默认）。
+//
+// 这里不只是"选个标识"，还决定了状态栏用哪套样式属性：
+// 实测 type 11(5G) 用 .SFUI-Medium（常规宽度），type 12(5G+) 用 .SFUI-SemiCondensedMedium（半压缩），
+// type 14(5G UC) 又是另一套。所以 5Gᴀ 要借用 5G+ 的枚举，才能拿到半压缩字形和更宽的槽位。
 static int NMEnumForMode(NSInteger mode, BOOL is4G) {
     if (is4G) {
         switch (mode) {
-            case NM4GOption4GA:    return NMConnectionLTEA;
+            case NM4GOption4GA:    return NMConnectionLTEPlus;   // 借 LTE+ 的半压缩样式
             case NM4GOption4GPlus: return NMConnectionLTEPlus;
             default:               return 0;
         }
     }
     switch (mode) {
         case NM5GOption5GPlus: return NMConnection5GPlus;
-        case NM5GOption5GA:    return NMConnection5G;      // 5Gᴀ 没有对应枚举，退回 5G
+        case NM5GOption5GA:    return NMConnection5GPlus;    // 借 5G+ 的半压缩样式
         case NM5GOption5GUWB:  return NMConnection5GUWB;
         case NM5GOption5GUC:   return NMConnection5GUC;
         default:               return 0;
@@ -267,76 +271,6 @@ static NSString *NMReplacementForNativeLabel(NSString *text) {
     return nil;   // 3G / E / GPRS 等一律不接管
 }
 
-#pragma mark - 字号归一
-
-// 状态栏文本视图在文本变宽时会自动缩小字号，导致 4Gᴀ / 5Gᴀ / 自定义文本
-// 比系统原生标识小一圈。这里在文本设置完成后把标签恢复成原生字号，并关闭自动缩放，
-// 使三者与原生 4G / LTE / 5G 完全同字号。
-
-static UILabel *NMTextLabelInView(UIView *view) {
-    if ([view isKindOfClass:[UILabel class]]) {
-        return (UILabel *)view;
-    }
-    for (UIView *subview in view.subviews) {
-        UILabel *label = NMTextLabelInView(subview);
-        if (label != nil) {
-            return label;
-        }
-    }
-    return nil;
-}
-
-static BOOL NMIsManagedLabel(NSString *text) {
-    if (text.length == 0) {
-        return NO;
-    }
-    NSDictionary *preferences = NMCurrentPreferences();
-
-    NSString *label4G = NM4GLabelForValue([preferences[NMKey4GMode] integerValue],
-                                          preferences[NMKey4GCustom]);
-    if (label4G.length > 0 && [text isEqualToString:label4G]) {
-        return YES;
-    }
-
-    NSString *label5G = NM5GLabelForValue([preferences[NMKey5GMode] integerValue],
-                                          preferences[NMKey5GCustom]);
-    return label5G.length > 0 && [text isEqualToString:label5G];
-}
-
-// 只从系统原生网络标识采样字号，避免被时间、运营商名等其它文本带偏。
-static BOOL NMIsNativeNetworkLabel(NSString *text) {
-    static NSSet<NSString *> *labels = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        labels = [NSSet setWithArray:@[ @"1x", @"GPRS", @"E", @"3G", @"4G", @"LTE",
-                                        @"LTE-A", @"LTE+", @"5GE", @"5G", @"5G+",
-                                        @"5G UWB", @"5G UC" ]];
-    });
-    return text.length > 0 && [labels containsObject:text];
-}
-
-static void NMMatchNativeFontSize(UIView *stringView, NSString *text) {
-    UILabel *label = NMTextLabelInView(stringView);
-    if (label == nil || label.font == nil) {
-        return;
-    }
-
-    static CGFloat nativeFontSize = 0;
-    if (NMIsNativeNetworkLabel(text) && label.font.pointSize > 0) {
-        nativeFontSize = label.font.pointSize;
-    }
-
-    if (!NMIsManagedLabel(text)) {
-        return;
-    }
-
-    if (nativeFontSize > 0 && fabs(label.font.pointSize - nativeFontSize) > 0.01) {
-        label.font = [label.font fontWithSize:nativeFontSize];
-    }
-    label.adjustsFontSizeToFitWidth = NO;
-    label.minimumScaleFactor = 1.0;
-}
-
 #pragma mark - Hook
 
 // 读取 block 的签名（libclosure 的私有函数，用 dlsym 取，避免链接依赖）
@@ -374,7 +308,7 @@ static BOOL NMBlockTakesSingleInt(void *block) {
             [@"" writeToFile:NMLogPathAlt atomically:NO encoding:NSUTF8StringEncoding error:NULL];
         }
         NSDictionary *preferences = NMCurrentPreferences();
-        NMLog(@"=== loaded %@ build=5.0.11 ===", [NSProcessInfo processInfo].processName);
+        NMLog(@"=== loaded %@ build=5.0.12 ===", [NSProcessInfo processInfo].processName);
         NMLog(@"prefs paths=%@", NMPreferencePaths());
         NMLog(@"prefs 4G=%@ 5G=%@ schema=%@",
               preferences[NMKey4GMode], preferences[NMKey5GMode], preferences[NMKeySchemaVersion]);
@@ -461,98 +395,14 @@ static BOOL NMBlockTakesSingleInt(void *block) {
 }
 %end
 
-// 第二层：状态栏文本视图自己的入口。
-// iOS 17 上 _UIStatusBarCellularItem 走的是 setOriginalText:（不是 setText:），
-// 在这里替换可以让视图按自己的字号/排版逻辑处理我们的文本，效果与原生一致。
-%hook _UIStatusBarStringView
-- (void)setOriginalText:(NSString *)text {
-    NSString *replacementString = NMReplacementForNativeLabel(text);
-    if (NMIsInterestingProcess() && NMIsNativeNetworkLabel(text)) {
-        NMLogOnce(@"stringViewOriginal", [NSString stringWithFormat:@"setOriginalText \"%@\" -> \"%@\"",
-                                          text, replacementString ?: @"nil"]);
-    }
-    if (replacementString.length > 0) {
-        %orig(replacementString);
-        return;
-    }
-    %orig;
-}
-
-- (void)setText:(NSString *)text {
-    NSString *replacementString = NMReplacementForNativeLabel(text);
-    if (NMIsInterestingProcess() && NMIsNativeNetworkLabel(text)) {
-        NMLogOnce(@"stringView", [NSString stringWithFormat:@"stringView \"%@\" -> \"%@\"",
-                                  text, replacementString ?: @"nil"]);
-    }
-    if (replacementString.length > 0) {
-        %orig(replacementString);
-        NMMatchNativeFontSize(self, replacementString);
-    } else {
-        %orig;
-        NMMatchNativeFontSize(self, text);
-    }
-}
-%end
-
-// 第三层兜底：文本最终落到 UILabel 时再替换一次。
-// 关键有两点：
-//   1. 保住原生字体对象，否则字重会被重置；
-//   2. 让承载它的 _UIStatusBarStringView 按新文本重新算宽度，
-//      否则状态栏仍按原生字符串（如 "5G"）分配的宽度，多出来的字符会被挤压。
-%hook UILabel
-- (void)setText:(NSString *)text {
-    if (NMIsSpringBoard() && NMIsNativeNetworkLabel(text)) {
-        NSString *replacementString = NMReplacementForNativeLabel(text);
-        if (replacementString.length > 0) {
-            UIFont *nativeFont = self.font;
-            CGSize nativeSize = self.bounds.size;
-
-            %orig(replacementString);
-
-            if (nativeFont != nil) {
-                self.font = nativeFont;
-            }
-
-            UIView *container = self.superview;
-            [container invalidateIntrinsicContentSize];
-            [container setNeedsLayout];
-
-            NMLogOnce(@"uilabel", [NSString stringWithFormat:
-                                   @"UILabel \"%@\" -> \"%@\" font=%@ %.1f/%.1f bounds=%.0fx%.0f container=%@",
-                                   text, replacementString, nativeFont.fontName,
-                                   nativeFont.pointSize, self.font.pointSize,
-                                   nativeSize.width, nativeSize.height,
-                                   NSStringFromClass([container class])]);
-            return;
-        }
-    }
-    %orig;
-}
-
-- (void)setAttributedText:(NSAttributedString *)text {
-    NSString *string = text.string;
-    if (NMIsSpringBoard() && NMIsNativeNetworkLabel(string)) {
-        NSString *replacementString = NMReplacementForNativeLabel(string);
-        if (replacementString.length > 0) {
-            NSMutableAttributedString *newText = [text mutableCopy];
-            [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
-                                   withString:replacementString];
-            NMLogOnce(@"uilabelAttr", [NSString stringWithFormat:@"UILabelAttr \"%@\" -> \"%@\"",
-                                       string, replacementString]);
-            %orig(newText);
-            return;
-        }
-    }
-    %orig;
-}
-%end
 
 // 真正的容器：SystemStatusUI 的 STUIStatusBarCellularNetworkTypeView。
 //
-// 实测：系统调用时 prefixLength 传的是 NSNotFound（9223372036854775807），
-// 表示"整串作为前缀、不拆分"；只有 "5G UC" 这类才会传具体拆分位置。
-// 所以这里必须原样透传 prefixLength —— 自己重算会把 "5Gᴀ" 强行拆成两段，
-// 那正是观感与原生不一致的原因。
+// 原生规则（实测）：
+//   "5G"    → prefixLength = NSNotFound，整串一个 run，字体 .SFUI-Medium
+//   "5G+"   → prefixLength = 2，拆成 "5G" + "+"（附属小字号），字体 .SFUI-SemiCondensedMedium
+//   "5G UC" → prefixLength = 2，拆成 "5G" + " UC"
+// 我们的标识要和 "5G+" 同款观感，就必须拆成 "5G" + "ᴀ" 这种两段结构。
 %hook STUIStatusBarCellularNetworkTypeView
 - (void)setText:(NSString *)text
    prefixLength:(NSUInteger)prefixLength
@@ -560,28 +410,27 @@ withStyleAttributes:(id)attributes
         forType:(int)type
        animated:(BOOL)animated {
     NSString *replacementString = NMReplacementForNativeLabel(text);
-    if (replacementString.length > 0) {
-        if (NMIsInterestingProcess()) {
-            NMLogOnce(@"typeViewText", [NSString stringWithFormat:
-                                        @"TypeView setText \"%@\" -> \"%@\" (prefix %lu 透传)",
-                                        text, replacementString, (unsigned long)prefixLength]);
-        }
-
-        // 记录替换前后的宽度：如果宽度没跟着文本变长而增加，说明槽位是按原生字符串定的
-        UIView *containerView = (UIView *)self;
-        CGFloat widthBefore = containerView.frame.size.width;
-        %orig(replacementString, prefixLength, attributes, type, animated);
-        if (NMIsInterestingProcess()) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                CGFloat widthAfter = containerView.frame.size.width;
-                NMLogOnce([NSString stringWithFormat:@"width-%@", replacementString],
-                          [NSString stringWithFormat:@"TypeView \"%@\" width %.1f -> %.1f",
-                           replacementString, widthBefore, widthAfter]);
-            });
-        }
+    if (replacementString.length == 0 || [replacementString isEqualToString:text]) {
+        %orig;
         return;
     }
-    %orig;
+
+    // 4G / 5G 开头且更长时，前缀取 2 个字符，让后缀走附属小字号（与 "5G+" 一致）
+    NSUInteger newPrefixLength = prefixLength;
+    if (replacementString.length > 2 &&
+        ([replacementString hasPrefix:@"4G"] || [replacementString hasPrefix:@"5G"])) {
+        newPrefixLength = 2;
+    } else {
+        newPrefixLength = replacementString.length;
+    }
+
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"typeViewText", [NSString stringWithFormat:
+                                    @"TypeView \"%@\"(prefix %lu) -> \"%@\"(prefix %lu)",
+                                    text, (unsigned long)prefixLength,
+                                    replacementString, (unsigned long)newPrefixLength]);
+    }
+    %orig(replacementString, newPrefixLength, attributes, type, animated);
 }
 
 - (void)setAttributedText:(NSAttributedString *)text
@@ -590,18 +439,26 @@ withStyleAttributes:(id)attributes
                  animated:(BOOL)animated {
     NSString *string = text.string;
     NSString *replacementString = NMReplacementForNativeLabel(string);
-    if (replacementString.length > 0) {
-        NSMutableAttributedString *newText = [text mutableCopy];
-        [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
-                               withString:replacementString];
-        if (NMIsInterestingProcess()) {
-            NMLogOnce(@"typeViewAttr", [NSString stringWithFormat:
-                                        @"TypeView setAttributedText \"%@\" -> \"%@\" (prefix %lu 透传)",
-                                        string, replacementString, (unsigned long)prefixLength]);
-        }
-        %orig(newText, prefixLength, type, animated);
+    if (replacementString.length == 0 || [replacementString isEqualToString:string]) {
+        %orig;
         return;
     }
-    %orig;
+
+    NSMutableAttributedString *newText = [text mutableCopy];
+    [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
+                           withString:replacementString];
+
+    NSUInteger newPrefixLength = replacementString.length;
+    if (replacementString.length > 2 &&
+        ([replacementString hasPrefix:@"4G"] || [replacementString hasPrefix:@"5G"])) {
+        newPrefixLength = 2;
+    }
+
+    if (NMIsInterestingProcess()) {
+        NMLogOnce(@"typeViewAttr", [NSString stringWithFormat:
+                                    @"TypeView attr \"%@\" -> \"%@\"(prefix %lu)",
+                                    string, replacementString, (unsigned long)newPrefixLength]);
+    }
+    %orig(newText, newPrefixLength, type, animated);
 }
 %end
