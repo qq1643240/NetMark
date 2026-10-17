@@ -4,11 +4,15 @@
 
 - 名称：**NetMark**
 - 标识符：**`com.netmark.logo`**
-- 当前版本 **6.0.1**：只保留 4G 与 5G，支持 `4Gᴀ` / `4G+` / `5Gᴀ` / `5G+` / `5G UWB` / `5G UC` 与自定义文本
+- 当前版本 **6.0.3**：只保留 4G 与 5G，支持 `4Gᴀ` / `4G+` / `5Gᴀ` / `5G+` / `5G UWB` / `5G UC` 与自定义文本
 
 > 由 [Data Logo Switcher](https://github.com/hirakujira/DataLogoSwitcher) 重构而来，MIT 协议与原作者署名保留。
 
 ## 更新记录
+
+**6.0.3** — 控制中心 / 通知中心改为两段式渲染，与状态栏观感一致；图标放大并重做为纯黑底白字 `5G`
+
+**6.0.2** — 修复控制中心 / 通知中心显示原生 `5G+` 而非 `5Gᴀ`（补 `UILabel` 兜底，并排除已拆段的 `NetworkTypeView`）
 
 **6.0.1** — 图标尺寸改为 29/58pt、去掉「当前状态」分组、界面只保留 4G / 5G
 
@@ -59,7 +63,13 @@
    `NSNotFound` 表示整串不拆。要和 `5G+` 一致就传 `2`。
 3. **4G 不要改枚举**。实测 `type 9(LTE+)` 在部分运营商配置下不可渲染，状态栏会显示 `?`。
    4G 靠 `LTEConnectionShows4G = NO` 让系统渲染标准 `LTE`，再替换文本。
-4. **不要在 `UILabel` 上兜底替换**。视图拆好 `prefixLabel` 之后，再改它的文本会把结构揉乱。
+4. **`UILabel` 兜底必须排除 `NetworkTypeView`**。控制中心 / 通知中心的运营商行不走
+   `NetworkTypeView`，只靠上面两层拿不到替换文本，会原样显示枚举对应的原生字样
+   （借了 `5G+` 的枚举就显示 `5G+`）。所以补一层 `UILabel` 兜底，但要把
+   `STUIStatusBarCellularNetworkTypeView` 内部的标签排除掉，否则会揉乱已经拆好的两段结构。
+5. **两段式要自己拼**。`NetworkTypeView` 有 `prefixLabel` + `accessoryLabel` 这套结构，
+   控制中心的普通 `UILabel` 没有。兜底时用 `NMTwoPartLabel()` 生成富文本：
+   前缀保持原字号，后缀缩到 `0.78` 倍并对齐基线，两处观感才一致。
 
 ## 界面
 

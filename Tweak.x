@@ -131,6 +131,31 @@ static BOOL NMIsSpringBoard(void) {
     return isSpringBoard;
 }
 
+// 控制中心 / 通知中心没有 prefixLabel + accessoryLabel 这套两段结构，
+// 这里用富文本自己拼一个同样比例的：前缀用原字号，后缀缩到 0.78 倍并对齐基线，
+// 这样两处的观感才一致。
+static NSAttributedString *NMTwoPartLabel(NSString *label, UIFont *font) {
+    NSMutableAttributedString *result =
+    [[NSMutableAttributedString alloc] initWithString:label];
+
+    NSUInteger prefixLength = NMPrefixLengthForLabel(label);
+    if (prefixLength > label.length) {
+        prefixLength = label.length;
+    }
+    if (prefixLength > 0) {
+        [result addAttribute:NSFontAttributeName
+                       value:font
+                       range:NSMakeRange(0, prefixLength)];
+    }
+    if (prefixLength < label.length) {
+        UIFont *suffixFont = [font fontWithSize:font.pointSize * 0.78];
+        NSRange suffixRange = NSMakeRange(prefixLength, label.length - prefixLength);
+        [result addAttribute:NSFontAttributeName value:suffixFont range:suffixRange];
+        [result addAttribute:NSBaselineOffsetAttributeName value:@(0) range:suffixRange];
+    }
+    return result;
+}
+
 // 状态栏那个视图已经把标识拆成 prefixLabel + accessoryLabel，
 // 再动它内部的 UILabel 会把拆分结构揉乱，所以这里要排除掉。
 static BOOL NMIsInsideNetworkTypeView(UIView *view) {
@@ -306,7 +331,8 @@ withStyleAttributes:(id)attributes
             UIFont *font = self.font;
             %orig(replacementString);
             if (font != nil) {
-                self.font = font;   // 保住原生字体，避免字重被重置
+                // 用富文本还原状态栏那种「前缀 + 小号后缀」的比例
+                self.attributedText = NMTwoPartLabel(replacementString, font);
             }
             return;
         }
@@ -321,10 +347,18 @@ withStyleAttributes:(id)attributes
         !NMIsInsideNetworkTypeView(self)) {
         NSString *replacementString = NMReplacementForNativeLabel(string);
         if (replacementString.length > 0 && ![replacementString isEqualToString:string]) {
-            NSMutableAttributedString *newText = [text mutableCopy];
-            [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
-                                   withString:replacementString];
-            %orig(newText);
+            UIFont *font = self.font;
+            if (font == nil) {
+                font = [text attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL];
+            }
+            if (font != nil) {
+                %orig(NMTwoPartLabel(replacementString, font));
+            } else {
+                NSMutableAttributedString *newText = [text mutableCopy];
+                [newText replaceCharactersInRange:NSMakeRange(0, newText.length)
+                                       withString:replacementString];
+                %orig(newText);
+            }
             return;
         }
     }
