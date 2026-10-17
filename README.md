@@ -8,6 +8,15 @@
 
 > 由 [Data Logo Switcher](https://github.com/hirakujira/DataLogoSwitcher) 重构而来，MIT 协议与原作者署名保留。
 
+## 更新记录
+
+**5.0.1** — 修复进入设置页闪退。`PSListController` 在 `controllerForSpecifier:` 中会直接给
+detail 控制器发 `setSpecifier:` / `setRootController:` / `setParentController:`，
+设置页原先继承 `UIViewController`，收到未知 selector 触发 `unrecognized selector` → `SIGABRT`。
+现改为继承 `PSViewController`，并链接 Preferences 私有框架。
+
+**5.0.0** — 重构：只保留 4G / 5G，新增 `4Gᴀ` / `5Gᴀ`，重做设置界面，改名 NetMark。
+
 ## 功能
 
 | 分组 | 可选标识 |
