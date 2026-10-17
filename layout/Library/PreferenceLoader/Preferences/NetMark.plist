@@ -1,0 +1,10 @@
+{
+	entry = {
+		bundle = NetMark;
+		cell = PSLinkCell;
+		detail = NMRootViewController;
+		icon = "Icon.png";
+		isController = 1;
+		label = "NetMark";
+	};
+}

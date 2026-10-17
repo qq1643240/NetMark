@@ -1,0 +1,15 @@
+*.o
+.theos/*
+debs/*
+packages/*
+out/*
+*.deb
+*.dylib
+**/.theos/*
+*/.theos/*
+*.sublime-workspace
+_/*
+*/obj/*
+**/obj/*
+.vscode/*
+.DS_Store

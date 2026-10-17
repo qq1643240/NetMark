@@ -1,0 +1,73 @@
+name: Build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build deb (rootful + rootless)
+    runs-on: macos-14
+    env:
+      SDK_VERSION: "14.5"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: brew install ldid xz dpkg
+
+      - name: Install Theos
+        run: |
+          git clone --depth 1 --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Install iOS SDK
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          cd "$RUNNER_TEMP/sdks"
+          git sparse-checkout set "iPhoneOS${SDK_VERSION}.sdk"
+          mkdir -p "$THEOS/sdks"
+          cp -R "iPhoneOS${SDK_VERSION}.sdk" "$THEOS/sdks/"
+
+      - name: Show toolchain
+        run: |
+          echo "THEOS=$THEOS"
+          xcodebuild -version
+          ldid -v || true
+          dpkg-deb --version | head -1
+
+      - name: Build rootful
+        run: |
+          make package FINALPACKAGE=1
+          mkdir -p out/rootful
+          mv packages/*.deb out/rootful/
+
+      - name: Build rootless
+        run: |
+          make clean
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+          mkdir -p out/rootless
+          mv packages/*.deb out/rootless/
+
+      - name: List packages
+        run: find out -name '*.deb' -exec ls -lh {} \;
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetMark-deb
+          path: out/**/*.deb
+          if-no-files-found: error
